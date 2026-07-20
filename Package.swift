@@ -16,6 +16,7 @@ import PackageDescription
 //   • PCMSpeechSynth    self-pacing speech-synthesis source (test signal)
 //   • AUProcessor       hosts one Audio Unit effect, stdin → effect → stdout
 //   • AudioInputCapture Core Audio device capture → 48 kHz/2 ch S16LE stdout
+//   • FMDeemphasis      first-order IIR de-emphasis filter (75 µs U.S. / 50 µs EU)
 //
 // Library product:
 //   • PipelineRunner    TaskPipelineManager + TaskItem — Process-chain
@@ -38,7 +39,8 @@ let package = Package(
         .executable(name: "PCMMixer", targets: ["PCMMixer"]),
         .executable(name: "PCMSpeechSynth", targets: ["PCMSpeechSynth"]),
         .executable(name: "AUProcessor", targets: ["AUProcessor"]),
-        .executable(name: "AudioInputCapture", targets: ["AudioInputCapture"])
+        .executable(name: "AudioInputCapture", targets: ["AudioInputCapture"]),
+        .executable(name: "FMDeemphasis", targets: ["FMDeemphasis"])
     ],
     targets: [
         .target(name: "PipelineRunner"),
@@ -48,6 +50,7 @@ let package = Package(
         .executableTarget(name: "PCMMixer"),
         .executableTarget(name: "PCMSpeechSynth"),
         .executableTarget(name: "AUProcessor"),
-        .executableTarget(name: "AudioInputCapture")
+        .executableTarget(name: "AudioInputCapture"),
+        .executableTarget(name: "FMDeemphasis")
     ]
 )
