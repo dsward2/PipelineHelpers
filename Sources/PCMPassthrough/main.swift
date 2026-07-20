@@ -26,13 +26,8 @@ var totalBytes = 0
 while true {
     let chunk = input.availableData
     if chunk.isEmpty { break } // EOF: upstream (rtl_fm) closed.
-    do {
-        try output.write(contentsOf: chunk)
-        totalBytes += chunk.count
-    } catch {
-        note("write failed after \(totalBytes) bytes: \(error)")
-        exit(1)
-    }
+    output.write(chunk)
+    totalBytes += chunk.count
 }
 
 note("stdin closed — \(totalBytes) bytes passed through; exiting")

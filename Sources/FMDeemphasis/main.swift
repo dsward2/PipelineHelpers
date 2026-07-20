@@ -81,12 +81,7 @@ while true {
         totalFrames += samples.count / channels
     }
 
-    do {
-        try output.write(contentsOf: processed)
-    } catch {
-        note("write failed: \(error)")
-        exit(1)
-    }
+    output.write(processed)
 }
 
 note("stdin closed — \(totalFrames) frames processed; exiting")
