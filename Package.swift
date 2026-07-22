@@ -44,6 +44,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "PipelineRunner"),
+        .testTarget(name: "PipelineRunnerTests", dependencies: ["PipelineRunner"]),
         .executableTarget(name: "PCMUDPSender"),
         .executableTarget(name: "PCMUDPReceiver"),
         .executableTarget(name: "PCMPassthrough"),
