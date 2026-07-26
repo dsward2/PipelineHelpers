@@ -35,6 +35,10 @@ public final class TaskPipelineManager {
     public private(set) var lastFailure: Failure?
     public private(set) var taskItems: [TaskItem] = []
 
+    /// When the pipeline was most recently started or stopped, for display in the UI.
+    public private(set) var lastStartedAt: Date?
+    public private(set) var lastStoppedAt: Date?
+
     private var monitorTask: Task<Void, Never>?
 
     public init() {}
@@ -91,6 +95,7 @@ public final class TaskPipelineManager {
             }
         }
         status = .running
+        lastStartedAt = Date()
         startMonitor()
     }
 
@@ -103,6 +108,7 @@ public final class TaskPipelineManager {
         }
         taskItems.removeAll()
         status = .terminated
+        lastStoppedAt = Date()
     }
 
     public func tasksInfoString() -> String {
