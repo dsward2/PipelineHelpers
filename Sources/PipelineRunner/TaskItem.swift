@@ -63,11 +63,16 @@ public final class TaskItem {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: path)
         task.arguments = argsArray
-        if !environmentOverrides.isEmpty {
-            var env = ProcessInfo.processInfo.environment
-            env.merge(environmentOverrides) { _, new in new }
-            task.environment = env
-        }
+
+        // Always set an explicit environment rather than inheriting the parent's.
+        // Strips DYLD_INSERT_LIBRARIES and other DYLD_* vars that Xcode injects for
+        // Swift Previews — helper binaries (shairport-sync, sox, PCMUDPSender) don't
+        // have __preview.dylib in their rpath, so dyld terminates them with SIGABRT
+        // if those variables are inherited.
+        var env = ProcessInfo.processInfo.environment
+        for key in env.keys where key.hasPrefix("DYLD_") { env.removeValue(forKey: key) }
+        env.merge(environmentOverrides) { _, new in new }
+        task.environment = env
 
         task.terminationHandler = { [weak self] terminated in
             let pid = terminated.processIdentifier
@@ -105,16 +110,19 @@ public final class TaskItem {
             return
         }
         task.terminate()
-        let deadline = Date().addingTimeInterval(2.0)
-        while task.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        if task.isRunning {
-            kill(task.processIdentifier, SIGKILL)
-        }
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe = nil
         process = nil
+        // Wait for graceful exit off the main thread; SIGKILL after 2 seconds if needed.
+        Task.detached {
+            let deadline = Date().addingTimeInterval(2.0)
+            while task.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if task.isRunning {
+                kill(task.processIdentifier, SIGKILL)
+            }
+        }
     }
 
     public func taskInfoString() -> String {

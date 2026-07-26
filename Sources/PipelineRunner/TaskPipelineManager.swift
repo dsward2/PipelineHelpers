@@ -30,8 +30,6 @@ public final class TaskPipelineManager {
     }
 
     private static let monitorInterval: Duration = .seconds(5)
-    private static let interStartDelay: TimeInterval = 0.2
-    private static let postTerminateDelay: TimeInterval = 0.1
 
     public private(set) var status: Status = .idle
     public private(set) var lastFailure: Failure?
@@ -91,7 +89,6 @@ public final class TaskPipelineManager {
                 status = .idle
                 throw PipelineError.startFailed(taskFunction: item.functionName, underlying: error)
             }
-            Thread.sleep(forTimeInterval: Self.interStartDelay)
         }
         status = .running
         startMonitor()
@@ -105,7 +102,6 @@ public final class TaskPipelineManager {
             item.terminate()
         }
         taskItems.removeAll()
-        Thread.sleep(forTimeInterval: Self.postTerminateDelay)
         status = .terminated
     }
 
@@ -128,8 +124,7 @@ public final class TaskPipelineManager {
             } else {
                 item.process?.standardOutput = FileHandle.nullDevice
             }
-            //item.process?.standardError = FileHandle.nullDevice
-            item.process?.standardError = FileHandle.standardError   // TODO: disable after testing
+            item.process?.standardError = FileHandle.nullDevice
         }
     }
 
