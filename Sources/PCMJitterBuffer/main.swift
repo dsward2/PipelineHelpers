@@ -78,6 +78,14 @@ let targetBufferBytes = (bytesPerSecond * bufferMs) / 1000
 
 note("started — rate=\(rate)Hz channels=\(channels) buffer=\(bufferMs)ms (\(targetBufferBytes) bytes)")
 
+// Ignore SIGPIPE at the process level. FileHandle.write(_:) — used below only
+// for reading stdin's availableData, not for the stdout writes — is fine, but
+// the raw write(2) calls this tool makes to stdout need EPIPE to come back as
+// an ordinary errno, not as a signal, so a downstream reader going away (e.g.
+// PCMUDPSender exiting) is something we can notice and shut down on cleanly
+// instead of being killed outright.
+signal(SIGPIPE, SIG_IGN)
+
 // MARK: Shared byte queue between the stdin reader thread and the pacing loop
 
 final class PCMQueue {
@@ -158,7 +166,7 @@ queue.waitUntilBuffered(targetBufferBytes)
 // as more data lands — self-correcting, no drift as long as the average
 // input rate matches --rate.
 
-let output = FileHandle.standardOutput
+let stdoutFD: Int32 = 1
 let tickInterval: TimeInterval = 0.02  // 20ms ticks
 let startTime = DispatchTime.now()
 var bytesWritten = 0
@@ -167,13 +175,36 @@ func elapsedSeconds() -> Double {
     Double(DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000
 }
 
+/// Writes `bytes` to stdout via the raw write(2) syscall. Unlike
+/// FileHandle.write(_:), which raises an uncatchable NSException on I/O
+/// failure, this returns false on error so the caller can shut down cleanly
+/// instead of crashing — the expected case being EPIPE once the downstream
+/// reader (PCMUDPSender) is gone.
+func writeToStdout(_ bytes: [UInt8]) -> Bool {
+    var offset = 0
+    let count = bytes.count
+    return bytes.withUnsafeBytes { rawBuffer -> Bool in
+        guard let base = rawBuffer.baseAddress else { return true }
+        while offset < count {
+            let n = write(stdoutFD, base + offset, count - offset)
+            if n < 0 {
+                if errno == EINTR { continue }
+                note("stdout write failed (\(String(cString: strerror(errno)))) — downstream reader is gone, exiting")
+                return false
+            }
+            offset += n
+        }
+        return true
+    }
+}
+
 while true {
     let targetBytes = Int(elapsedSeconds() * Double(bytesPerSecond))
     let targetFrameAligned = (targetBytes / bytesPerFrame) * bytesPerFrame
     if targetFrameAligned > bytesWritten {
         let chunk = queue.take(upTo: targetFrameAligned - bytesWritten)
         if !chunk.isEmpty {
-            output.write(Data(chunk))
+            guard writeToStdout(chunk) else { exit(0) }
             bytesWritten += chunk.count
         }
     }
