@@ -17,6 +17,9 @@ import PackageDescription
 //   • AUProcessor       hosts one Audio Unit effect, stdin → effect → stdout
 //   • AudioInputCapture Core Audio device capture → 48 kHz/2 ch S16LE stdout
 //   • FMDeemphasis      first-order IIR de-emphasis filter (75 µs U.S. / 50 µs EU)
+//   • PCMJitterBuffer   real-time pacing stage: absorbs bursty upstream
+//                       delivery (e.g. nrsc5's ~186ms HD Radio logical-frame
+//                       cadence) and re-emits it as a steady stream
 //
 // Library product:
 //   • PipelineRunner    TaskPipelineManager + TaskItem — Process-chain
@@ -40,7 +43,8 @@ let package = Package(
         .executable(name: "PCMSpeechSynth", targets: ["PCMSpeechSynth"]),
         .executable(name: "AUProcessor", targets: ["AUProcessor"]),
         .executable(name: "AudioInputCapture", targets: ["AudioInputCapture"]),
-        .executable(name: "FMDeemphasis", targets: ["FMDeemphasis"])
+        .executable(name: "FMDeemphasis", targets: ["FMDeemphasis"]),
+        .executable(name: "PCMJitterBuffer", targets: ["PCMJitterBuffer"])
     ],
     targets: [
         .target(name: "PipelineRunner"),
@@ -52,6 +56,7 @@ let package = Package(
         .executableTarget(name: "PCMSpeechSynth"),
         .executableTarget(name: "AUProcessor"),
         .executableTarget(name: "AudioInputCapture"),
-        .executableTarget(name: "FMDeemphasis")
+        .executableTarget(name: "FMDeemphasis"),
+        .executableTarget(name: "PCMJitterBuffer")
     ]
 )
