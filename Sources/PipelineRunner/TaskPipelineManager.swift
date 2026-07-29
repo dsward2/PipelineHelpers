@@ -111,6 +111,20 @@ public final class TaskPipelineManager {
         lastStoppedAt = Date()
     }
 
+    /// Blocking variant of `terminate()` — does not return until every task's
+    /// process has actually exited. See `TaskItem.terminateAndWait`.
+    public func terminateAndWait(timeout: TimeInterval = 2.0) {
+        monitorTask?.cancel()
+        monitorTask = nil
+        status = .terminating
+        for item in taskItems where item.process?.isRunning == true {
+            item.terminateAndWait(timeout: timeout)
+        }
+        taskItems.removeAll()
+        status = .terminated
+        lastStoppedAt = Date()
+    }
+
     public func tasksInfoString() -> String {
         guard !taskItems.isEmpty else {
             return "No tasks currently running\n\n"

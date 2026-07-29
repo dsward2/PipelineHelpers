@@ -125,6 +125,46 @@ public final class TaskItem {
         }
     }
 
+    /// Blocking variant of `terminate()`: sends SIGTERM and does not return
+    /// until the process has actually exited (SIGKILLing it after `timeout`
+    /// if it won't die gracefully). Use this when a caller is about to start
+    /// a replacement pipeline immediately and needs any exclusive resource
+    /// (hardware device, port) the old process held to be genuinely free —
+    /// `terminate()`'s fire-and-forget wait can't provide that guarantee.
+    ///
+    /// Unlike `terminate()`, this genuinely blocks the calling thread (it
+    /// can't dispatch its wait off-thread the way `terminate()` does, or it
+    /// would return before the guarantee above holds). If called from
+    /// `@MainActor` code — as ControlBooth's `PipelineRunner.start(_:)`
+    /// currently does, to free a destination before starting a replacement
+    /// pipeline — a subprocess that's slow to exit (stuck hardware I/O, a
+    /// wedged device close) can visibly stall the UI for up to
+    /// `timeout + 0.5s`. If that ever shows up as a real hitch rather than a
+    /// theoretical one, look here first before assuming it's something else.
+    public func terminateAndWait(timeout: TimeInterval = 2.0) {
+        guard let task = process, task.isRunning else {
+            stderrPipe?.fileHandleForReading.readabilityHandler = nil
+            stderrPipe = nil
+            process = nil
+            return
+        }
+        task.terminate()
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe = nil
+        process = nil
+        let deadline = Date().addingTimeInterval(timeout)
+        while task.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if task.isRunning {
+            kill(task.processIdentifier, SIGKILL)
+            let killDeadline = Date().addingTimeInterval(0.5)
+            while task.isRunning && Date() < killDeadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+    }
+
     public func taskInfoString() -> String {
         let pid = process?.processIdentifier ?? 0
         let runningFlag = (process?.isRunning ?? false) ? 1 : 0
