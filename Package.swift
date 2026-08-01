@@ -20,11 +20,21 @@ import PackageDescription
 //   • PCMJitterBuffer   real-time pacing stage: absorbs bursty upstream
 //                       delivery (e.g. nrsc5's ~186ms HD Radio logical-frame
 //                       cadence) and re-emits it as a steady stream
+//   • LiveAudioRecorder stdin → stdout passthrough stage that tees the PCM
+//                       into MP3/AAC file recording; can sit before or after
+//                       LiveAudioServer in AntennaHead, or run standalone
+//                       (including several instances concurrently) in
+//                       ControlBooth
 //
-// Library product:
+// Library products:
 //   • PipelineRunner    TaskPipelineManager + TaskItem — Process-chain
 //                       assembly/teardown used by both apps (previously
 //                       duplicated verbatim in ControlBooth)
+//   • AudioEncoders     MP3/AAC PCM encoders (ported from LiveAudioServer's
+//                       MP3Encoder/AACEncoder, minus its HTTP-streaming
+//                       machinery) shared by LiveAudioRecorder; LiveAudioServer
+//                       still carries its own copy for now — see repo notes on
+//                       migrating it to depend on this target instead
 //
 // Every stage speaks the shared contract: raw S16LE PCM on stdin/stdout,
 // normalized to 48 kHz / 2 ch before reaching LiveAudioServer.
@@ -36,6 +46,7 @@ let package = Package(
     ],
     products: [
         .library(name: "PipelineRunner", targets: ["PipelineRunner"]),
+        .library(name: "AudioEncoders", targets: ["AudioEncoders"]),
         .executable(name: "PCMUDPSender", targets: ["PCMUDPSender"]),
         .executable(name: "PCMUDPReceiver", targets: ["PCMUDPReceiver"]),
         .executable(name: "PCMPassthrough", targets: ["PCMPassthrough"]),
@@ -44,11 +55,23 @@ let package = Package(
         .executable(name: "AUProcessor", targets: ["AUProcessor"]),
         .executable(name: "AudioInputCapture", targets: ["AudioInputCapture"]),
         .executable(name: "FMDeemphasis", targets: ["FMDeemphasis"]),
-        .executable(name: "PCMJitterBuffer", targets: ["PCMJitterBuffer"])
+        .executable(name: "PCMJitterBuffer", targets: ["PCMJitterBuffer"]),
+        .executable(name: "LiveAudioRecorder", targets: ["LiveAudioRecorder"])
     ],
     targets: [
         .target(name: "PipelineRunner"),
         .testTarget(name: "PipelineRunnerTests", dependencies: ["PipelineRunner"]),
+        // Vendored libmp3lame as a universal (arm64 + x86_64) static
+        // XCFramework, mirrored from LiveAudioServer/Frameworks. Regenerate
+        // there via scripts/build-mp3lame-xcframework.sh and re-copy.
+        .binaryTarget(
+            name: "CLame",
+            path: "Frameworks/Mp3Lame.xcframework"
+        ),
+        .target(
+            name: "AudioEncoders",
+            dependencies: ["CLame"]
+        ),
         .executableTarget(name: "PCMUDPSender"),
         .executableTarget(name: "PCMUDPReceiver"),
         .executableTarget(name: "PCMPassthrough"),
@@ -57,6 +80,10 @@ let package = Package(
         .executableTarget(name: "AUProcessor"),
         .executableTarget(name: "AudioInputCapture"),
         .executableTarget(name: "FMDeemphasis"),
-        .executableTarget(name: "PCMJitterBuffer")
+        .executableTarget(name: "PCMJitterBuffer"),
+        .executableTarget(
+            name: "LiveAudioRecorder",
+            dependencies: ["AudioEncoders"]
+        )
     ]
 )
