@@ -1,4 +1,4 @@
 module PHCLame {
-    header "lame.h"
+    header "phlame.h"
     export *
 }
