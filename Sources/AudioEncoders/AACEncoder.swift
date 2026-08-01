@@ -16,7 +16,7 @@ import AudioToolbox
 
 /// Wraps a raw AAC frame in a 7-byte ADTS header so it can be written/streamed
 /// without an MP4 container.
-func adtsHeader(frameLength: Int, sampleRate: Int, channels: Int) -> [UInt8] {
+public func adtsHeader(frameLength: Int, sampleRate: Int, channels: Int) -> [UInt8] {
     // ADTS sync word + header (no CRC, so 7 bytes)
     let aacProfile: UInt8 = 2        // AAC-LC = profile 1 (value - 1 in header = 1)
     let freqIndex: UInt8  = sampleRateIndex(sampleRate)

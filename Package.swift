@@ -61,6 +61,7 @@ let package = Package(
     targets: [
         .target(name: "PipelineRunner"),
         .testTarget(name: "PipelineRunnerTests", dependencies: ["PipelineRunner"]),
+        .testTarget(name: "AudioEncodersTests", dependencies: ["AudioEncoders"]),
         // Vendored libmp3lame as a universal (arm64 + x86_64) static
         // XCFramework, mirrored from LiveAudioServer/Frameworks. Regenerate
         // there via scripts/build-mp3lame-xcframework.sh and re-copy.
