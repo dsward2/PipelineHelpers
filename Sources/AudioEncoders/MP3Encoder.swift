@@ -5,7 +5,7 @@
 // has no dependency on LiveAudioServer's HTTP-streaming machinery.
 
 import Foundation
-import CLame
+import PHCLame
 
 public final class MP3Encoder {
     private let config: AudioEncoderConfig

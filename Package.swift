@@ -64,13 +64,19 @@ let package = Package(
         // Vendored libmp3lame as a universal (arm64 + x86_64) static
         // XCFramework, mirrored from LiveAudioServer/Frameworks. Regenerate
         // there via scripts/build-mp3lame-xcframework.sh and re-copy.
+        //
+        // Named PHCLame, not CLame: LiveAudioServer vendors the same
+        // xcframework under its own "CLame" binaryTarget, and when both
+        // packages sit in one app's dependency graph (AntennaHead, which
+        // depends on both), SwiftPM requires every target name to be unique
+        // across the whole graph — "CLame" here would collide with theirs.
         .binaryTarget(
-            name: "CLame",
+            name: "PHCLame",
             path: "Frameworks/Mp3Lame.xcframework"
         ),
         .target(
             name: "AudioEncoders",
-            dependencies: ["CLame"]
+            dependencies: ["PHCLame"]
         ),
         .executableTarget(name: "PCMUDPSender"),
         .executableTarget(name: "PCMUDPReceiver"),
