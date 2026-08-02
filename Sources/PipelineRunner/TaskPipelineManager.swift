@@ -41,6 +41,12 @@ public final class TaskPipelineManager {
 
     private var monitorTask: Task<Void, Never>?
 
+    /// Forwards every task's relayed stderr line (source = that task's
+    /// `functionName`) plus this manager's own diagnostic messages, so a
+    /// host app can pipe pipeline activity into its own logging system
+    /// without this package depending on a concrete log type.
+    public var onLog: ((_ source: String, _ message: String) -> Void)?
+
     public init() {}
 
     public func makeTaskItem(executableName: String, functionName: String) throws -> TaskItem {
@@ -144,7 +150,28 @@ public final class TaskPipelineManager {
             } else {
                 item.process?.standardOutput = FileHandle.nullDevice
             }
-            item.process?.standardError = FileHandle.nullDevice
+
+            let errorPipe = Pipe()
+            item.process?.standardError = errorPipe
+            item.stderrPipe = errorPipe
+
+            let buffer = StderrLineBuffer()
+            let functionName = item.functionName
+            errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                let lines = buffer.appendAndExtractLines(data)
+                guard !lines.isEmpty else { return }
+                Task { @MainActor in
+                    for line in lines {
+                        self?.onLog?(functionName, line)
+                    }
+                }
+            }
+
+            item.onLog = { [weak self] message in
+                self?.onLog?(functionName, message)
+            }
         }
     }
 
@@ -173,6 +200,7 @@ public final class TaskPipelineManager {
                     exitStatus = -1
                 }
                 print("TaskPipelineManager - failed task detected - \(item.functionName) exitStatus=\(exitStatus)")
+                onLog?(item.functionName, "failed task detected - exitStatus=\(exitStatus)")
                 lastFailure = Failure(
                     functionName: item.functionName,
                     terminationStatus: exitStatus,
@@ -182,5 +210,31 @@ public final class TaskPipelineManager {
                 return
             }
         }
+    }
+}
+
+/// Accumulates bytes from a subprocess's stderr `readabilityHandler`
+/// (invoked off the main actor on a GCD-managed queue) and extracts complete
+/// newline-terminated lines. A locked reference type rather than a captured
+/// `var` so the closure stays free of the "mutation of captured var in
+/// concurrently-executing code" Sendable warning that would otherwise be an
+/// error under Swift 6 strict concurrency.
+private final class StderrLineBuffer: @unchecked Sendable {
+    private var data = Data()
+    private let lock = NSLock()
+
+    func appendAndExtractLines(_ newData: Data) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        data.append(newData)
+        var lines: [String] = []
+        while let newlineIndex = data.firstIndex(of: 0x0A) {
+            let lineData = data[data.startIndex..<newlineIndex]
+            data.removeSubrange(data.startIndex...newlineIndex)
+            if let line = String(data: lineData, encoding: .utf8), !line.isEmpty {
+                lines.append(line)
+            }
+        }
+        return lines
     }
 }

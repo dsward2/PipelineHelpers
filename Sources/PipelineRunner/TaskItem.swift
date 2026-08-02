@@ -21,9 +21,19 @@ public final class TaskItem {
     public private(set) var argsArray: [String] = []
     public private(set) var environmentOverrides: [String: String] = [:]
     public private(set) var process: Process?
-    public private(set) var stderrPipe: Pipe?
+    /// Assigned by `TaskPipelineManager.configureTaskPipes()`, which is why
+    /// the setter is `internal` rather than `private` — it lives in this
+    /// module but a different file/type.
+    public internal(set) var stderrPipe: Pipe?
     public private(set) var lastTerminationStatus: Int32?
     public private(set) var lastTerminationReason: Process.TerminationReason?
+
+    /// Called for this task's own diagnostic messages (launch/termination)
+    /// and, once `TaskPipelineManager.configureTaskPipes()` wires up
+    /// `stderrPipe`, for each line of the subprocess's relayed stderr.
+    /// Lets a host app forward everything through its own logging system
+    /// without this package needing to know about a concrete log type.
+    public var onLog: ((String) -> Void)?
 
     public init(path: String, functionName: String) {
         self.path = path
@@ -80,7 +90,9 @@ public final class TaskItem {
             let reason = terminated.terminationReason
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                print("TaskItem PID=\(pid) - \(self.path) terminationHandler status=\(status) reason=\(reason.rawValue)")
+                let message = "TaskItem PID=\(pid) - \(self.path) terminationHandler status=\(status) reason=\(reason.rawValue)"
+                print(message)
+                self.onLog?(message)
                 self.lastTerminationStatus = status
                 self.lastTerminationReason = reason
                 self.process = nil
@@ -96,7 +108,9 @@ public final class TaskItem {
         }
         do {
             try task.run()
-            print("TaskItem - Launched Process PID=\(task.processIdentifier), \(path) \(argsString())")
+            let message = "TaskItem - Launched Process PID=\(task.processIdentifier), \(path) \(argsString())"
+            print(message)
+            onLog?(message)
         } catch {
             throw TaskItemError.launchFailed("\(error)")
         }
