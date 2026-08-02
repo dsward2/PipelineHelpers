@@ -14,6 +14,8 @@ import PackageDescription
 //   • PCMPassthrough    stdin → stdout template stage
 //   • PCMMixer          mixes two PCM inputs
 //   • PCMSpeechSynth    self-pacing speech-synthesis source (test signal)
+//   • PCMFilePlayer     self-pacing AAC/MP3 (or any AVAudioFile-readable)
+//                       file/playlist source, with optional indefinite repeat
 //   • AUProcessor       hosts one Audio Unit effect, stdin → effect → stdout
 //   • AudioInputCapture Core Audio device capture → 48 kHz/2 ch S16LE stdout
 //   • FMDeemphasis      first-order IIR de-emphasis filter (75 µs U.S. / 50 µs EU)
@@ -52,6 +54,7 @@ let package = Package(
         .executable(name: "PCMPassthrough", targets: ["PCMPassthrough"]),
         .executable(name: "PCMMixer", targets: ["PCMMixer"]),
         .executable(name: "PCMSpeechSynth", targets: ["PCMSpeechSynth"]),
+        .executable(name: "PCMFilePlayer", targets: ["PCMFilePlayer"]),
         .executable(name: "AUProcessor", targets: ["AUProcessor"]),
         .executable(name: "AudioInputCapture", targets: ["AudioInputCapture"]),
         .executable(name: "FMDeemphasis", targets: ["FMDeemphasis"]),
@@ -84,6 +87,7 @@ let package = Package(
         .executableTarget(name: "PCMPassthrough"),
         .executableTarget(name: "PCMMixer"),
         .executableTarget(name: "PCMSpeechSynth"),
+        .executableTarget(name: "PCMFilePlayer"),
         .executableTarget(name: "AUProcessor"),
         .executableTarget(name: "AudioInputCapture"),
         .executableTarget(name: "FMDeemphasis"),
