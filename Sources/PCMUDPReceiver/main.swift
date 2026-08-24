@@ -13,8 +13,9 @@ import Darwin
 //     stage normalizes rate/channels to the 48 kHz / 2 ch LAS contract.
 //
 // Usage: PCMUDPReceiver --port <n> [--bind <addr>] [--exit-with-parent]
-//   --bind defaults to 127.0.0.1 (loopback only); use 0.0.0.0 to accept
-//     datagrams from other machines on the LAN.
+//   --bind accepts IPv4 (e.g. 127.0.0.1, 0.0.0.0) or IPv6 (e.g. ::1, ::)
+//     addresses. Defaults to 127.0.0.1. The socket family (AF_INET vs
+//     AF_INET6) is inferred automatically from the address format.
 //   --exit-with-parent makes this process exit if the launching app dies (even
 //     on a crash/SIGKILL, where the app can't run its own cleanup). Because
 //     this is the upstream-most stage, downstream stages then see EOF and the
@@ -90,25 +91,48 @@ if exitWithParent {
 
 // MARK: UDP socket setup (bound listening socket)
 
-let socketFD = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-guard socketFD >= 0 else {
-    fail("socket() failed: \(String(cString: strerror(errno)))")
-}
+// Infer socket family from the bind address: try IPv6 first, fall back to IPv4.
+var in6Addr = in6_addr()
+let isIPv6 = inet_pton(AF_INET6, bind, &in6Addr) == 1
 
-// Allow quick restarts of the pipeline on the same port.
-var reuse: Int32 = 1
-_ = setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+let socketFD: Int32
+let bindResult: Int32
 
-var addr = sockaddr_in()
-addr.sin_family = sa_family_t(AF_INET)
-addr.sin_port = port.bigEndian
-guard inet_pton(AF_INET, bind, &addr.sin_addr) == 1 else {
-    fail("invalid bind address '\(bind)'")
-}
-
-let bindResult = withUnsafePointer(to: &addr) { rawAddr in
-    rawAddr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockAddr in
-        Darwin.bind(socketFD, sockAddr, socklen_t(MemoryLayout<sockaddr_in>.size))
+if isIPv6 {
+    socketFD = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)
+    guard socketFD >= 0 else {
+        fail("socket(AF_INET6) failed: \(String(cString: strerror(errno)))")
+    }
+    var reuse: Int32 = 1
+    _ = setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+    var addr6 = sockaddr_in6()
+    addr6.sin6_family = sa_family_t(AF_INET6)
+    addr6.sin6_port = port.bigEndian
+    addr6.sin6_addr = in6Addr
+    bindResult = withUnsafePointer(to: &addr6) { rawAddr in
+        rawAddr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.bind(socketFD, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+        }
+    }
+} else {
+    var in4Addr = in_addr()
+    guard inet_pton(AF_INET, bind, &in4Addr) == 1 else {
+        fail("invalid bind address '\(bind)' (not a valid IPv4 or IPv6 address)")
+    }
+    socketFD = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+    guard socketFD >= 0 else {
+        fail("socket(AF_INET) failed: \(String(cString: strerror(errno)))")
+    }
+    var reuse: Int32 = 1
+    _ = setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+    var addr4 = sockaddr_in()
+    addr4.sin_family = sa_family_t(AF_INET)
+    addr4.sin_port = port.bigEndian
+    addr4.sin_addr = in4Addr
+    bindResult = withUnsafePointer(to: &addr4) { rawAddr in
+        rawAddr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.bind(socketFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
     }
 }
 guard bindResult == 0 else {
