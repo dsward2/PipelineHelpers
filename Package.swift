@@ -74,9 +74,15 @@ let package = Package(
         // packages sit in one app's dependency graph (AntennaHead, which
         // depends on both), SwiftPM requires every target name to be unique
         // across the whole graph — "CLame" here would collide with theirs.
+        //
+        // Directory named PHMp3Lame.xcframework (not Mp3Lame.xcframework) so
+        // Xcode's SignatureCollection task produces a distinct output path from
+        // LiveAudioServer's copy; duplicate output paths cause "Unexpected
+        // duplicate tasks" during archive even though the SwiftPM target names
+        // are already unique.
         .binaryTarget(
             name: "PHCLame",
-            path: "Frameworks/Mp3Lame.xcframework"
+            path: "Frameworks/PHMp3Lame.xcframework"
         ),
         .target(
             name: "AudioEncoders",
