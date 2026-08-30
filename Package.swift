@@ -12,6 +12,8 @@ import PackageDescription
 //                       input, or cross-app hop to PCMUDPReceiver)
 //   • PCMUDPReceiver    source stage: UDP datagrams → stdout
 //   • PCMPassthrough    stdin → stdout template stage
+//   • PCMPrefix         plays a pre-rendered clip, then passes stdin through —
+//                       used for the spoken station announcement before playback
 //   • PCMMixer          mixes two PCM inputs
 //   • PCMSpeechSynth    self-pacing speech-synthesis source (test signal)
 //   • PCMFilePlayer     self-pacing AAC/MP3 (or any AVAudioFile-readable)
@@ -52,6 +54,7 @@ let package = Package(
         .executable(name: "PCMUDPSender", targets: ["PCMUDPSender"]),
         .executable(name: "PCMUDPReceiver", targets: ["PCMUDPReceiver"]),
         .executable(name: "PCMPassthrough", targets: ["PCMPassthrough"]),
+        .executable(name: "PCMPrefix", targets: ["PCMPrefix"]),
         .executable(name: "PCMMixer", targets: ["PCMMixer"]),
         .executable(name: "PCMSpeechSynth", targets: ["PCMSpeechSynth"]),
         .executable(name: "PCMFilePlayer", targets: ["PCMFilePlayer"]),
@@ -91,6 +94,7 @@ let package = Package(
         .executableTarget(name: "PCMUDPSender"),
         .executableTarget(name: "PCMUDPReceiver"),
         .executableTarget(name: "PCMPassthrough"),
+        .executableTarget(name: "PCMPrefix"),
         .executableTarget(name: "PCMMixer"),
         .executableTarget(name: "PCMSpeechSynth"),
         .executableTarget(name: "PCMFilePlayer"),

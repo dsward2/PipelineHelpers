@@ -30,6 +30,10 @@ import Darwin
 //                  only com.apple.speech.synthesis.voice.* voices honor them)
 //   --repeat       loop the audio continuously
 //   --gap          seconds of silence between repeats / utterances (default 1.0)
+//   --no-pace      write the rendered audio as fast as the sink accepts instead
+//                  of metering it in real time — for rendering a fixed clip to
+//                  a file (e.g. AntennaHead's station announcement) rather than
+//                  driving a live pipeline. Ignored for the udp source.
 //   --list-voices  print available voices to stdout and exit
 
 let log = FileHandle.standardError
@@ -59,6 +63,7 @@ struct Options {
     var ssml = false
     var repeatForever = false
     var gapSeconds = 1.0
+    var pace = true
     var exitWithParent = false
 }
 
@@ -107,6 +112,8 @@ func parseArguments() -> Options {
             o.ssml = true
         case "--repeat":
             o.repeatForever = true
+        case "--no-pace":
+            o.pace = false
         case "--gap":
             i += 1
             guard i < args.count, let gap = Double(args[i]), gap >= 0 else {
@@ -328,6 +335,7 @@ func writePaced(_ data: Data) {
                 written += n
             }
             offset += length
+            guard options.pace else { continue }
             paceDeadline.addTimeInterval(Double(length) / bytesPerSecond)
             let delay = paceDeadline.timeIntervalSinceNow
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
