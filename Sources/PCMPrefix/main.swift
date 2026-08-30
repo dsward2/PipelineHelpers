@@ -225,6 +225,13 @@ if !clip.isEmpty {
 
 // MARK: Phase 2 — passthrough until stdin closes
 
+// Belt-and-suspenders: guarantee blocking reads before the passthrough loop.
+// Phase 1's drop mode makes stdin non-blocking and restores it, but if that
+// restore is ever a no-op the first read here would return EAGAIN — and with
+// a short clip the live source (rtl_fm) often hasn't produced a sample yet,
+// so that race is real. The loop also treats EAGAIN as "retry", never EOF.
+setNonBlocking(false)
+
 let ptSize = 65_536
 let ptBuf = UnsafeMutableRawPointer.allocate(byteCount: ptSize, alignment: 1)
 var total = 0
@@ -232,6 +239,14 @@ while true {
     let n = read(0, ptBuf, ptSize)
     if n < 0 {
         if errno == EINTR { continue }
+        if errno == EAGAIN || errno == EWOULDBLOCK {
+            // stdin is still non-blocking and upstream has nothing yet
+            // (e.g. rtl_fm warming up). Force blocking mode and wait —
+            // this is not end-of-stream.
+            setNonBlocking(false)
+            Thread.sleep(forTimeInterval: 0.005)
+            continue
+        }
         note("stdin read error (\(String(cString: strerror(errno)))); exiting")
         break
     }
