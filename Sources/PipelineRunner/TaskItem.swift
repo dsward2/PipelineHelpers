@@ -129,9 +129,9 @@ public final class TaskItem {
         process = nil
         // Wait for graceful exit off the main thread; SIGKILL after 2 seconds if needed.
         Task.detached {
-            let deadline = Date().addingTimeInterval(2.0)
-            while task.isRunning && Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.05)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2.0))
+            while task.isRunning && ContinuousClock.now < deadline {
+                try? await Task.sleep(until: .now.advanced(by: .milliseconds(50)), clock: .continuous)
             }
             if task.isRunning {
                 kill(task.processIdentifier, SIGKILL)
