@@ -75,8 +75,14 @@ let (rate, channels, bufferMs) = parseArguments()
 let bytesPerFrame = channels * 2
 let bytesPerSecond = rate * bytesPerFrame
 let targetBufferBytes = (bytesPerSecond * bufferMs) / 1000
+// Hard ceiling on the queue. The design absorbs bursts by letting output fall
+// behind and catch up, so under normal use the queue drains to ~targetBufferBytes.
+// But if the average input rate genuinely exceeds --rate (wrong --rate, or a
+// source that overproduces), nothing would ever bound it. Past this many bytes
+// the oldest audio is dropped rather than grown without limit.
+let maxQueuedBytes = max(targetBufferBytes * 4, bytesPerSecond * 3)
 
-note("started — rate=\(rate)Hz channels=\(channels) buffer=\(bufferMs)ms (\(targetBufferBytes) bytes)")
+note("started — rate=\(rate)Hz channels=\(channels) buffer=\(bufferMs)ms (\(targetBufferBytes) bytes, cap \(maxQueuedBytes))")
 
 // Ignore SIGPIPE at the process level. FileHandle.write(_:) — used below only
 // for reading stdin's availableData, not for the stdout writes — is fine, but
@@ -92,10 +98,16 @@ final class PCMQueue {
     private let condition = NSCondition()
     private var bytes = [UInt8]()
     private var eof = false
+    private(set) var droppedBytes = 0
 
     func append(_ chunk: Data) {
         condition.lock()
         bytes.append(contentsOf: chunk)
+        if bytes.count > maxQueuedBytes {
+            let overflow = bytes.count - maxQueuedBytes
+            bytes.removeFirst(overflow)
+            droppedBytes += overflow
+        }
         condition.signal()
         condition.unlock()
     }
@@ -142,14 +154,17 @@ let queue = PCMQueue()
 
 let readerThread = Thread {
     let input = FileHandle.standardInput
-    while true {
-        let chunk = input.availableData
-        if chunk.isEmpty {
-            queue.markEOF()
-            return
+    var sawEOF = false
+    while !sawEOF {
+        // availableData returns an autoreleased NSData and this thread runs no
+        // run loop; without a pool per iteration every chunk read stays alive.
+        autoreleasepool {
+            let chunk = input.availableData
+            if chunk.isEmpty { sawEOF = true; return }
+            queue.append(chunk)
         }
-        queue.append(chunk)
     }
+    queue.markEOF()
 }
 readerThread.start()
 
@@ -212,4 +227,5 @@ while true {
     Thread.sleep(forTimeInterval: tickInterval)
 }
 
-note("stdin closed — \(bytesWritten) bytes paced through; exiting")
+let droppedNote = queue.droppedBytes > 0 ? " (\(queue.droppedBytes) bytes dropped — input outran --rate)" : ""
+note("stdin closed — \(bytesWritten) bytes paced through\(droppedNote); exiting")

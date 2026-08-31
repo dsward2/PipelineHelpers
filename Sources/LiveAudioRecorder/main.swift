@@ -120,16 +120,21 @@ var totalBytes = 0
 
 note("started — \(sampleRate) Hz / \(channels) ch")
 
-while true {
-    let chunk = input.availableData
-    if chunk.isEmpty { break } // EOF: upstream closed.
-    output.write(chunk)
-    totalBytes += chunk.count
+var sawEOF = false
+while !sawEOF {
+    // availableData returns an autoreleased NSData; this loop runs no run loop,
+    // so wrap each iteration or every chunk read since startup stays alive.
+    autoreleasepool {
+        let chunk = input.availableData
+        if chunk.isEmpty { sawEOF = true; return } // EOF: upstream closed.
+        output.write(chunk)
+        totalBytes += chunk.count
 
-    chunk.withUnsafeBytes { rawPtr in
-        let samples = rawPtr.bindMemory(to: Int16.self)
-        mp3Encoder?.encode(samples: samples)
-        aacEncoder?.encode(samples: samples)
+        chunk.withUnsafeBytes { rawPtr in
+            let samples = rawPtr.bindMemory(to: Int16.self)
+            mp3Encoder?.encode(samples: samples)
+            aacEncoder?.encode(samples: samples)
+        }
     }
 }
 

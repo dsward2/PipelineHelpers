@@ -23,11 +23,17 @@ func note(_ message: String) {
 note("started — passing through S16LE mono 48000 Hz")
 
 var totalBytes = 0
-while true {
-    let chunk = input.availableData
-    if chunk.isEmpty { break } // EOF: upstream (rtl_fm) closed.
-    output.write(chunk)
-    totalBytes += chunk.count
+var sawEOF = false
+while !sawEOF {
+    // availableData hands back an autoreleased NSData and this loop runs no run
+    // loop, so without an explicit pool every chunk read since startup stays
+    // alive — a slow but unbounded leak over a long-running stream.
+    autoreleasepool {
+        let chunk = input.availableData
+        if chunk.isEmpty { sawEOF = true; return } // EOF: upstream (rtl_fm) closed.
+        output.write(chunk)
+        totalBytes += chunk.count
+    }
 }
 
 note("stdin closed — \(totalBytes) bytes passed through; exiting")

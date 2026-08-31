@@ -61,27 +61,32 @@ let input  = FileHandle.standardInput
 let output = FileHandle.standardOutput
 var totalFrames = 0
 
-while true {
-    let chunk = input.availableData
-    if chunk.isEmpty { break }  // EOF: upstream closed
+var sawEOF = false
+while !sawEOF {
+    // availableData returns an autoreleased NSData; this loop runs no run loop,
+    // so wrap each iteration or every chunk read since startup stays alive.
+    autoreleasepool {
+        let chunk = input.availableData
+        if chunk.isEmpty { sawEOF = true; return }  // EOF: upstream closed
 
-    // Work on a mutable copy so we can re-interpret bytes as Int16 in place.
-    var processed = chunk
-    processed.withUnsafeMutableBytes { rawPtr in
-        let samples = rawPtr.bindMemory(to: Int16.self)
-        for i in 0..<samples.count {
-            let ch = i % channels
-            let x = Double(samples[i])
-            state[ch] = gain * x + alpha * state[ch]
-            // Clamp before converting; filter output should stay in range but
-            // guard against floating-point edge cases at the Int16 boundary.
-            let clamped = max(-32_768.0, min(32_767.0, state[ch]))
-            samples[i] = Int16(clamped.rounded())
+        // Work on a mutable copy so we can re-interpret bytes as Int16 in place.
+        var processed = chunk
+        processed.withUnsafeMutableBytes { rawPtr in
+            let samples = rawPtr.bindMemory(to: Int16.self)
+            for i in 0..<samples.count {
+                let ch = i % channels
+                let x = Double(samples[i])
+                state[ch] = gain * x + alpha * state[ch]
+                // Clamp before converting; filter output should stay in range but
+                // guard against floating-point edge cases at the Int16 boundary.
+                let clamped = max(-32_768.0, min(32_767.0, state[ch]))
+                samples[i] = Int16(clamped.rounded())
+            }
+            totalFrames += samples.count / channels
         }
-        totalFrames += samples.count / channels
-    }
 
-    output.write(processed)
+        output.write(processed)
+    }
 }
 
 note("stdin closed — \(totalFrames) frames processed; exiting")
