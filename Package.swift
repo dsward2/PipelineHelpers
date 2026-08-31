@@ -29,6 +29,10 @@ import PackageDescription
 //                       LiveAudioServer in AntennaHead, or run standalone
 //                       (including several instances concurrently) in
 //                       ControlBooth
+//   • PCMTranscriber    stdin → stdout passthrough stage that tees the PCM
+//                       into Apple's on-device SpeechAnalyzer/SpeechTranscriber
+//                       (macOS 26+); emits result JSON over UDP and/or a
+//                       text/SRT/VTT transcript file. No-ops on older systems.
 //
 // Library products:
 //   • PipelineRunner    TaskPipelineManager + TaskItem — Process-chain
@@ -62,7 +66,8 @@ let package = Package(
         .executable(name: "AudioInputCapture", targets: ["AudioInputCapture"]),
         .executable(name: "FMDeemphasis", targets: ["FMDeemphasis"]),
         .executable(name: "PCMJitterBuffer", targets: ["PCMJitterBuffer"]),
-        .executable(name: "LiveAudioRecorder", targets: ["LiveAudioRecorder"])
+        .executable(name: "LiveAudioRecorder", targets: ["LiveAudioRecorder"]),
+        .executable(name: "PCMTranscriber", targets: ["PCMTranscriber"])
     ],
     targets: [
         .target(name: "PipelineRunner"),
@@ -105,6 +110,7 @@ let package = Package(
         .executableTarget(
             name: "LiveAudioRecorder",
             dependencies: ["AudioEncoders"]
-        )
+        ),
+        .executableTarget(name: "PCMTranscriber")
     ]
 )
