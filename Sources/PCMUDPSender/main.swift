@@ -37,7 +37,7 @@ func parseArguments() -> (host: String, port: UInt16, exitWithParent: Bool) {
     var host = "127.0.0.1"
     var port: UInt16?
     var exitWithParent = false
-    var args = Array(CommandLine.arguments.dropFirst())
+    let args = Array(CommandLine.arguments.dropFirst())
     var i = 0
     while i < args.count {
         switch args[i] {
@@ -116,29 +116,36 @@ note("started — forwarding S16LE mono 48000 Hz to \(host):\(port)")
 let maxDatagram = 2048
 let input = FileHandle.standardInput
 var totalBytes = 0
+var sawEOF = false
 
-while true {
-    let chunk = input.availableData
-    if chunk.isEmpty { break } // EOF: upstream closed.
+while !sawEOF {
+    // Each availableData call hands back an autoreleased NSData. This loop runs
+    // no run loop, so the thread's pool is never drained — without an explicit
+    // autoreleasepool every chunk read since startup stays alive, which leaked
+    // many GB over an overnight run. Scope each iteration's temporaries.
+    autoreleasepool {
+        let chunk = input.availableData
+        if chunk.isEmpty { sawEOF = true; return } // EOF: upstream closed.
 
-    // Split into datagrams no larger than maxDatagram.
-    var offset = 0
-    let count = chunk.count
-    let sendFailed: Bool = chunk.withUnsafeBytes { rawBuffer -> Bool in
-        guard let base = rawBuffer.baseAddress else { return true }
-        while offset < count {
-            let length = min(maxDatagram, count - offset)
-            let sent = send(socketFD, base + offset, length, 0)
-            if sent < 0 {
-                note("send() failed after \(totalBytes) bytes: \(String(cString: strerror(errno)))")
-                return true
+        // Split into datagrams no larger than maxDatagram.
+        var offset = 0
+        let count = chunk.count
+        let sendFailed: Bool = chunk.withUnsafeBytes { rawBuffer -> Bool in
+            guard let base = rawBuffer.baseAddress else { return true }
+            while offset < count {
+                let length = min(maxDatagram, count - offset)
+                let sent = send(socketFD, base + offset, length, 0)
+                if sent < 0 {
+                    note("send() failed after \(totalBytes) bytes: \(String(cString: strerror(errno)))")
+                    return true
+                }
+                offset += length
+                totalBytes += length
             }
-            offset += length
-            totalBytes += length
+            return false
         }
-        return false
+        if sendFailed { exit(1) }
     }
-    if sendFailed { exit(1) }
 }
 
 note("stdin closed — \(totalBytes) bytes sent; exiting")

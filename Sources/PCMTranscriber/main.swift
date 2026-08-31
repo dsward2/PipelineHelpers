@@ -235,11 +235,27 @@ final class FileResultSink {
 nonisolated(unsafe) let udpSink = options.udpPort.flatMap { UDPResultSink(host: options.udpHost, port: $0) }
 nonisolated(unsafe) let fileSink = options.transcriptFile.flatMap { FileResultSink(path: $0) }
 
+/// Depth of the not-yet-written result backlog on `sinkQueue`. If a sink stalls
+/// (e.g. nothing is draining the UDP socket) this bounds how many *partial*
+/// results we will queue behind it; finals are always enqueued.
+final class SinkBacklog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var depth: Int { lock.withLock { count } }
+    func adjust(_ delta: Int) { lock.withLock { count += delta } }
+}
+let sinkBacklog = SinkBacklog()
+let maxPendingPartials = 256
+
 func emit(type: String, text: String, start: Double?, end: Double?) {
+    let isFinal = (type == "final")
+    if !isFinal, sinkBacklog.depth >= maxPendingPartials { return }  // shed partials, never finals
+    sinkBacklog.adjust(1)
     let event = ResultEvent(type: type, text: text, start: start, end: end)
     sinkQueue.async {
-        if type == "final" || options.emitPartials { udpSink?.emit(event) }
-        if type == "final" { fileSink?.writeFinal(text: text, start: start, end: end) }
+        defer { sinkBacklog.adjust(-1) }
+        if isFinal || options.emitPartials { udpSink?.emit(event) }
+        if isFinal { fileSink?.writeFinal(text: text, start: start, end: end) }
     }
 }
 
@@ -325,12 +341,34 @@ func runTranscription(_ options: Options) async {
         return (start.isFinite ? start : nil, end.isFinite ? end : nil)
     }
 
-    let (inputSequence, inputBuilder) = AsyncStream<AnalyzerInput>.makeStream()
+    // Bound the hand-off to the recognizer. The stdin tee below runs at real
+    // time; SpeechAnalyzer can briefly fall behind (model warm-up, machine
+    // under load). An unbounded stream just accumulates converted audio for the
+    // whole session — over an overnight run that reached tens of GB of RSS and
+    // panicked the machine. Keep only the most recent chunks; if the recognizer
+    // falls further behind, drop the oldest audio. The stdout passthrough is
+    // unaffected — only the recognition copy is lossy.
+    let maxBufferedChunks = 64
+    let (inputSequence, inputBuilder) = AsyncStream<AnalyzerInput>.makeStream(
+        bufferingPolicy: .bufferingNewest(maxBufferedChunks)
+    )
 
     do {
         try await analyzer.start(inputSequence: inputSequence)
     } catch {
         fail("SpeechAnalyzer failed to start: \(error)")
+    }
+
+    // A continuous stream never reaches EOF, so nothing would otherwise trigger
+    // finalization and the analyzer would retain every second of audio and
+    // context for the entire session. Flush on a timer so it emits finals and
+    // releases what is behind them.
+    let finalizeInterval: UInt64 = 5_000_000_000  // 5 s
+    let periodicFinalize = Task {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: finalizeInterval)
+            try? await analyzer.finalize(through: nil)
+        }
     }
     note("started — \(Int(options.inputRate)) Hz / \(options.inputChannels) ch in, "
          + "\(Int(analyzerFormat.sampleRate)) Hz to the recognizer")
@@ -340,13 +378,26 @@ func runTranscription(_ options: Options) async {
     let stdoutHandle = FileHandle.standardOutput
     Thread.detachNewThread {
         var total = 0
-        while true {
-            let chunk = stdinHandle.availableData
-            if chunk.isEmpty { break }            // EOF: upstream closed
-            stdoutHandle.write(chunk)             // lossless passthrough — always first
-            total += chunk.count
-            if let buffer = makePCMBuffer(chunk), let converted = convert(buffer) {
-                inputBuilder.yield(AnalyzerInput(buffer: converted))
+        var dropped = 0
+        var sawEOF = false
+        while !sawEOF {
+            // availableData / write / the AVFoundation conversion produce
+            // autoreleased temporaries, and this thread runs no run loop to
+            // drain the pool. Without an explicit pool per iteration they
+            // accumulate for the life of the process.
+            autoreleasepool {
+                let chunk = stdinHandle.availableData
+                if chunk.isEmpty { sawEOF = true; return }   // EOF: upstream closed
+                stdoutHandle.write(chunk)                     // lossless passthrough — always first
+                total += chunk.count
+                if let buffer = makePCMBuffer(chunk), let converted = convert(buffer) {
+                    if case .dropped = inputBuilder.yield(AnalyzerInput(buffer: converted)) {
+                        dropped += 1
+                        if dropped.isMultiple(of: 128) {
+                            note("recognizer behind real time — dropped \(dropped) audio chunks")
+                        }
+                    }
+                }
             }
         }
         note("stdin closed — \(total) bytes passed through; finalizing transcript")
@@ -365,6 +416,7 @@ func runTranscription(_ options: Options) async {
         note("recognition stream ended with error: \(error)")
     }
 
+    periodicFinalize.cancel()
     sinkQueue.sync { fileSink?.finish() }
     note("done")
 }
