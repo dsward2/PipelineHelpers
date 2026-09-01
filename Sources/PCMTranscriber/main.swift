@@ -348,7 +348,13 @@ func runTranscription(_ options: Options) async {
     // panicked the machine. Keep only the most recent chunks; if the recognizer
     // falls further behind, drop the oldest audio. The stdout passthrough is
     // unaffected — only the recognition copy is lossy.
-    let maxBufferedChunks = 64
+    //
+    // Sized for headroom, not a tight leash: at ~0.05 s of audio per stdin
+    // chunk this is ~10–15 s of slack, enough to ride out a transient stall
+    // (or a natural pause in a `finalize`) without dropping a word. The real
+    // leak fix is the autoreleasepool below; this only stops a pathological
+    // wedge from running away.
+    let maxBufferedChunks = 256
     let (inputSequence, inputBuilder) = AsyncStream<AnalyzerInput>.makeStream(
         bufferingPolicy: .bufferingNewest(maxBufferedChunks)
     )
@@ -359,11 +365,17 @@ func runTranscription(_ options: Options) async {
         fail("SpeechAnalyzer failed to start: \(error)")
     }
 
-    // A continuous stream never reaches EOF, so nothing would otherwise trigger
-    // finalization and the analyzer would retain every second of audio and
-    // context for the entire session. Flush on a timer so it emits finals and
-    // releases what is behind them.
-    let finalizeInterval: UInt64 = 5_000_000_000  // 5 s
+    // SpeechTranscriber with `.volatileResults` endpoints and finalizes
+    // segments on its own at natural pauses, releasing the audio behind each —
+    // so retention stays bounded during normal speech without our help.
+    // Forcing `finalize(through:)` on a short timer instead *bisects* whatever
+    // phrase straddles the tick, severing the recognizer's context and often
+    // garbling or dropping the continuation (heard as "one phrase perfect, the
+    // next missed"). Keep only a long safety valve: it's a no-op under normal
+    // speech (everything has already endpointed well before this fires) and
+    // only bites during an abnormal minutes-long unbroken monologue, which is
+    // exactly when a retention cap is worth one clipped segment.
+    let finalizeInterval: UInt64 = 300_000_000_000  // 5 min
     let periodicFinalize = Task {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: finalizeInterval)
