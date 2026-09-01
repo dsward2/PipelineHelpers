@@ -571,33 +571,39 @@ note("started — \(component.name) (\(component.manufacturerName)), "
 let stdinHandle = FileHandle.standardInput
 var carry = Data()
 
-while true {
-    let chunk = stdinHandle.availableData
-    if chunk.isEmpty { break }   // EOF: upstream closed.
-    carry.append(chunk)
+var sawEOF = false
+while !sawEOF {
+    // availableData / subdata / renderOffline produce autoreleased temporaries
+    // and this loop runs no run loop to drain the pool — wrap each iteration or
+    // they accumulate for the life of the process.
+    autoreleasepool {
+        let chunk = stdinHandle.availableData
+        if chunk.isEmpty { sawEOF = true; return }   // EOF: upstream closed.
+        carry.append(chunk)
 
-    let wholeFrames = carry.count / bytesPerFrame
-    guard wholeFrames > 0 else { continue }
+        let wholeFrames = carry.count / bytesPerFrame
+        guard wholeFrames > 0 else { return }
 
-    var frameOffset = 0
-    while frameOffset < wholeFrames {
-        let frames = min(wholeFrames - frameOffset, Int(maxFrames))
-        // Data keeps its indices after removeFirst, so range from startIndex.
-        let byteStart = carry.startIndex + frameOffset * bytesPerFrame
-        fillPending(from: carry.subdata(in: byteStart..<(byteStart + frames * bytesPerFrame)))
-        pendingOffset = 0
+        var frameOffset = 0
+        while frameOffset < wholeFrames {
+            let frames = min(wholeFrames - frameOffset, Int(maxFrames))
+            // Data keeps its indices after removeFirst, so range from startIndex.
+            let byteStart = carry.startIndex + frameOffset * bytesPerFrame
+            fillPending(from: carry.subdata(in: byteStart..<(byteStart + frames * bytesPerFrame)))
+            pendingOffset = 0
 
-        do {
-            let status = try engine.renderOffline(AVAudioFrameCount(frames), to: renderedBuffer)
-            guard status == .success else { fail("render failed with status \(status.rawValue)") }
-        } catch {
-            fail("render failed: \(error.localizedDescription)")
+            do {
+                let status = try engine.renderOffline(AVAudioFrameCount(frames), to: renderedBuffer)
+                guard status == .success else { fail("render failed with status \(status.rawValue)") }
+            } catch {
+                fail("render failed: \(error.localizedDescription)")
+            }
+
+            writeStdout(s16Data(from: renderedBuffer))
+            frameOffset += frames
         }
-
-        writeStdout(s16Data(from: renderedBuffer))
-        frameOffset += frames
+        carry.removeFirst(wholeFrames * bytesPerFrame)
     }
-    carry.removeFirst(wholeFrames * bytesPerFrame)
 }
 
 note("stdin closed — exiting")

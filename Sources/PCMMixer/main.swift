@@ -315,10 +315,15 @@ let fifos: [ByteFIFO?] = options.inputs.enumerated().map { index, input in
     case .stdin:
         Thread.detachNewThread {
             let stdinHandle = FileHandle.standardInput
-            while true {
-                let chunk = stdinHandle.availableData
-                if chunk.isEmpty { note("stdin input ended"); return }
-                fifo.append(chunk)
+            var sawEOF = false
+            while !sawEOF {
+                // availableData returns an autoreleased NSData; this thread runs
+                // no run loop, so wrap each read or chunks accumulate forever.
+                autoreleasepool {
+                    let chunk = stdinHandle.availableData
+                    if chunk.isEmpty { note("stdin input ended"); sawEOF = true; return }
+                    fifo.append(chunk)
+                }
             }
         }
     case .udp(let port):
@@ -412,7 +417,8 @@ while true {
         if received == 0 { continue }
         chunk = Data(bytes: masterBuffer, count: received)
     } else {
-        chunk = FileHandle.standardInput.availableData
+        // Scope availableData's autoreleased NSData; this loop drains no pool.
+        chunk = autoreleasepool { FileHandle.standardInput.availableData }
         if chunk.isEmpty { break }   // EOF: upstream closed.
     }
 
