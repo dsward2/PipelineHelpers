@@ -34,8 +34,13 @@ import PackageDescription
 //                       (macOS 26+); emits result JSON over UDP and/or a
 //                       text/SRT/VTT transcript file. No-ops on older systems.
 //   • PCMDistanceGain   distance-based loudness falloff stage (spatial-audio
-//                       prep, alongside a future binaural/direction stage);
-//                       live-adjustable over its own UDP control port
+//                       prep, alongside PCMBinauralPanner); live-adjustable
+//                       over its own UDP control port
+//   • PCMBinauralPanner direction stage: ITD/ILD-based azimuth/elevation
+//                       panning (not measured-HRTF), downmixing to mono and
+//                       emitting true 2-channel binaural output; sits
+//                       downstream of PCMDistanceGain, live-adjustable over
+//                       its own UDP control port
 //
 // Library products:
 //   • PipelineRunner    TaskPipelineManager + TaskItem — Process-chain
@@ -71,7 +76,8 @@ let package = Package(
         .executable(name: "PCMJitterBuffer", targets: ["PCMJitterBuffer"]),
         .executable(name: "LiveAudioRecorder", targets: ["LiveAudioRecorder"]),
         .executable(name: "PCMTranscriber", targets: ["PCMTranscriber"]),
-        .executable(name: "PCMDistanceGain", targets: ["PCMDistanceGain"])
+        .executable(name: "PCMDistanceGain", targets: ["PCMDistanceGain"]),
+        .executable(name: "PCMBinauralPanner", targets: ["PCMBinauralPanner"])
     ],
     targets: [
         .target(name: "PipelineRunner"),
@@ -116,6 +122,7 @@ let package = Package(
             dependencies: ["AudioEncoders"]
         ),
         .executableTarget(name: "PCMTranscriber"),
-        .executableTarget(name: "PCMDistanceGain")
+        .executableTarget(name: "PCMDistanceGain"),
+        .executableTarget(name: "PCMBinauralPanner")
     ]
 )
