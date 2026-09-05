@@ -184,8 +184,15 @@ func setNonBlocking(_ on: Bool) {
     _ = fcntl(0, F_SETFL, on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK))
 }
 
+let frameBytes = options.channels * MemoryLayout<Int16>.size
 let drainSize = 65_536
 let drainBuf = UnsafeMutableRawPointer.allocate(byteCount: drainSize, alignment: 1)
+
+/// Total bytes discarded by `drainAndDiscard()` during drop mode. Read once,
+/// after Phase 1, to realign the passthrough to a frame boundary — a partial
+/// frame left consumed here shifts every downstream S16LE sample by 1–3 bytes,
+/// which is white-noise static (odd shift) or swapped channels (2-byte shift).
+var droppedBytes = 0
 
 /// Reads and discards whatever is currently readable on stdin (stdin must be
 /// non-blocking). Keeps a live source from stalling while the clip plays.
@@ -193,6 +200,7 @@ func drainAndDiscard() {
     while true {
         let n = read(0, drainBuf, drainSize)
         if n <= 0 { break }   // 0 = EOF, -1 = EAGAIN/EWOULDBLOCK
+        droppedBytes += n
     }
 }
 
@@ -231,6 +239,23 @@ if !clip.isEmpty {
 // a short clip the live source (rtl_fm) often hasn't produced a sample yet,
 // so that race is real. The loop also treats EAGAIN as "retry", never EOF.
 setNonBlocking(false)
+
+// Realign to a frame boundary. `drainAndDiscard()` stops on whatever byte the
+// pipe happened to hold, so it can leave a partial S16LE frame consumed;
+// starting passthrough there shifts every downstream sample by 1–3 bytes
+// (odd = static, 2 = channel swap). Consume the remainder — a handful of
+// bytes — with blocking reads so Phase 2 begins on a whole frame.
+if options.during == .drop {
+    var slop = droppedBytes % frameBytes
+    if slop != 0 {
+        note("realigning passthrough: dropping \(slop) partial-frame byte(s)")
+        while slop > 0 {
+            let n = read(0, drainBuf, slop)
+            if n <= 0 { break }   // EOF or error — Phase 2 will handle it
+            slop -= n
+        }
+    }
+}
 
 let ptSize = 65_536
 let ptBuf = UnsafeMutableRawPointer.allocate(byteCount: ptSize, alignment: 1)
