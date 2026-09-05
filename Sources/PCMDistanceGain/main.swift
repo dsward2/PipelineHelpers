@@ -312,21 +312,27 @@ let bytesPerFrame = channels * MemoryLayout<Int16>.size
 // One air-absorption filter state per channel, persistent across chunks.
 var airAbsorptionState = [Double](repeating: 0, count: channels)
 
-/// Applies the air-absorption lowpass only when there's actually absorption
-/// to apply (`amount > 0`); otherwise passes `x` through exactly and keeps
-/// the filter's state caught up to the input — same reasoning as
-/// PCMBinauralPanner's `shadowFiltered`: a one-pole filter at even a
-/// 20 kHz "no absorption" cutoff still measurably softens content above it,
-/// and bypassing avoids both that coloration and any discontinuity if
-/// absorption later ramps up from zero.
+/// Blends the air-absorption lowpass into the output by `amount`, rather
+/// than switching it fully on/off at a threshold. The filter itself always
+/// runs — its state is never reset or frozen — so it's already "warmed up"
+/// however much of it ends up in the output; only the *blend weight*
+/// changes with distance, and a weight change is just a crossfade, not a
+/// filter-state discontinuity.
+///
+/// This replaces an earlier hard-bypass version (`amount > 0 ? filtered :
+/// x`, state frozen to `x` at rest) that had exact bypass at rest but a
+/// real, audible artifact recovering from it: state left stale at whatever
+/// heavily-smoothed value the filter last held, so the very next sample
+/// after crossing back to zero had to snap from that stale value to the
+/// raw signal — caught via a live RTL-SDR test where a distance-recovery
+/// transition produced a brief brightness spike *above* the steady-state
+/// baseline, the signature of a transient, not real program content.
+/// At `amount == 0` this still bypasses exactly (`x + 0·(...) == x`), so
+/// nothing is lost — it's strictly a fix, not a trade-off.
 @inline(__always)
 func airAbsorptionFiltered(_ x: Double, channel: Int, alpha: Double, amount: Double) -> Double {
-    guard amount > 0 else {
-        airAbsorptionState[channel] = x
-        return x
-    }
     airAbsorptionState[channel] = (1 - alpha) * x + alpha * airAbsorptionState[channel]
-    return airAbsorptionState[channel]
+    return x + amount * (airAbsorptionState[channel] - x)
 }
 
 note("started — \(Int(options.sampleRate)) Hz \(channels) ch, "

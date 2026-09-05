@@ -360,19 +360,26 @@ func onePole(_ x: Double, state: inout Double, alpha: Double) -> Double {
     return state
 }
 
-/// Applies the head-shadow lowpass only when there's actually shadow to
-/// apply (`shadowAmount > 0`); otherwise passes `x` through exactly and
-/// keeps the filter's state caught up to the input, so there's no
-/// coloration on the near/on-axis ear — a one-pole filter at even an
-/// 18 kHz "no shadow" cutoff still measurably softens content well above
-/// it — and no discontinuity if shadow later ramps up from zero.
+/// Blends the head-shadow lowpass into the output by `shadowAmount`, rather
+/// than switching it fully on/off at a threshold. The filter always runs
+/// (state is never reset or frozen), so it's already caught up to whatever
+/// the current blend needs; only the *blend weight* changes with azimuth,
+/// which is just a crossfade, not a filter-state discontinuity.
+///
+/// An earlier hard-bypass version (`shadowAmount > 0 ? filtered : x`, state
+/// frozen to `x` at rest) had exact bypass on-axis but a real, audible
+/// artifact when azimuth swept back through the ear that had been
+/// shadowed: state left stale at a heavily-smoothed value, so the next
+/// sample after crossing back to zero shadow had to snap to the raw
+/// signal. Caught in `PCMDistanceGain`'s identical pattern via a live
+/// RTL-SDR test (a brief brightness spike right at a distance-recovery
+/// transition); fixed here proactively for the same reason, since a pad
+/// drag through azimuth 0° hits this exact case. At `shadowAmount == 0`
+/// this still bypasses exactly (`x + 0·(...) == x`).
 @inline(__always)
 func shadowFiltered(_ x: Double, state: inout Double, alpha: Double, shadowAmount: Double) -> Double {
-    guard shadowAmount > 0 else {
-        state = x
-        return x
-    }
-    return onePole(x, state: &state, alpha: alpha)
+    state = (1 - alpha) * x + alpha * state
+    return x + shadowAmount * (state - x)
 }
 
 @inline(__always)
