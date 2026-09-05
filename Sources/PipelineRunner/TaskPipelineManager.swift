@@ -117,6 +117,18 @@ public final class TaskPipelineManager {
         lastStoppedAt = Date()
     }
 
+    /// Forgets every task **without** signalling its process, and stops the
+    /// liveness monitor. The caller has taken ownership of the still-running
+    /// processes and will terminate them on its own schedule (e.g. after a
+    /// fade-out); stopping the monitor keeps those deliberate, imminent exits
+    /// from being reported as failures.
+    public func detachAllTasks() {
+        monitorTask?.cancel()
+        monitorTask = nil
+        taskItems.removeAll()
+        status = .idle
+    }
+
     /// Blocking variant of `terminate()` — does not return until every task's
     /// process has actually exited. See `TaskItem.terminateAndWait`.
     public func terminateAndWait(timeout: TimeInterval = 2.0) {
