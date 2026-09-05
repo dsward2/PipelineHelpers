@@ -33,6 +33,9 @@ import PackageDescription
 //                       into Apple's on-device SpeechAnalyzer/SpeechTranscriber
 //                       (macOS 26+); emits result JSON over UDP and/or a
 //                       text/SRT/VTT transcript file. No-ops on older systems.
+//   • PCMDistanceGain   distance-based loudness falloff stage (spatial-audio
+//                       prep, alongside a future binaural/direction stage);
+//                       live-adjustable over its own UDP control port
 //
 // Library products:
 //   • PipelineRunner    TaskPipelineManager + TaskItem — Process-chain
@@ -67,7 +70,8 @@ let package = Package(
         .executable(name: "FMDeemphasis", targets: ["FMDeemphasis"]),
         .executable(name: "PCMJitterBuffer", targets: ["PCMJitterBuffer"]),
         .executable(name: "LiveAudioRecorder", targets: ["LiveAudioRecorder"]),
-        .executable(name: "PCMTranscriber", targets: ["PCMTranscriber"])
+        .executable(name: "PCMTranscriber", targets: ["PCMTranscriber"]),
+        .executable(name: "PCMDistanceGain", targets: ["PCMDistanceGain"])
     ],
     targets: [
         .target(name: "PipelineRunner"),
@@ -111,6 +115,7 @@ let package = Package(
             name: "LiveAudioRecorder",
             dependencies: ["AudioEncoders"]
         ),
-        .executableTarget(name: "PCMTranscriber")
+        .executableTarget(name: "PCMTranscriber"),
+        .executableTarget(name: "PCMDistanceGain")
     ]
 )
