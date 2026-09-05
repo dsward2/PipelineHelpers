@@ -9,28 +9,45 @@ import Darwin
 //   Input  : raw S16LE PCM, interleaved channels, on stdin
 //   Output : the same format with distance attenuation applied, on stdout
 //
-// Sits upstream of a future binaural/direction stage (Steam Audio or
-// similar) in the same pipeline — distance and direction are independent
-// cues, and most spatial-audio SDKs' binaural effects only handle
-// direction, leaving loudness falloff to whatever sits next to them.
-// This stage is that neighbor.
+// Sits upstream of PCMBinauralPanner in the pipeline — distance and
+// direction are independent cues, and most spatial-audio SDKs' binaural
+// effects only handle direction, leaving loudness falloff to whatever sits
+// next to them. This stage is that neighbor.
+//
+// Also applies air absorption: real distance rolls off high frequencies
+// faster than low ones (part of what makes something sound "far" beyond
+// just "quiet"), via a one-pole lowpass per channel whose cutoff drops as
+// distance grows past the reference distance, floored at
+// --air-absorption-min-cutoff by --air-absorption-distance.
 //
 // Usage: PCMDistanceGain [--rate <Hz>] [--channels <n>]
 //        [--distance <d>] [--reference-distance <d>] [--rolloff <r>]
-//        [--min-gain <g>] [--control-port <n>] [--exit-with-parent]
+//        [--min-gain <g>] [--air-absorption-min-cutoff <Hz>]
+//        [--air-absorption-max-cutoff <Hz>] [--air-absorption-distance <d>]
+//        [--control-port <n>] [--exit-with-parent]
 //
-//   --rate                sample rate in Hz (default 48000)
-//   --channels            channel count (default 2)
-//   --distance            initial distance, pad units (default 1.0 — the
-//                         pad's outer ring, i.e. unity gain)
-//   --reference-distance  distance at/inside which gain is unity (default 1.0)
-//   --rolloff             falloff exponent; 1.0 = physical inverse-distance,
-//                         lower is gentler (default 0.8)
-//   --min-gain            floor so a far source fades, never vanishes
-//                         (default 0.05)
-//   --control-port        UDP port for live updates (see below)
-//   --exit-with-parent    exit if the parent process dies (same watchdog
-//                         pattern as the other pipeline helpers)
+//   --rate                     sample rate in Hz (default 48000)
+//   --channels                 channel count (default 2)
+//   --distance                 initial distance, pad units (default 1.0 —
+//                              the pad's outer ring, i.e. unity gain)
+//   --reference-distance       distance at/inside which gain is unity
+//                              (default 1.0)
+//   --rolloff                  falloff exponent; 1.0 = physical
+//                              inverse-distance, lower is gentler
+//                              (default 0.8)
+//   --min-gain                 floor so a far source fades, never vanishes
+//                              (default 0.05)
+//   --air-absorption-min-cutoff  lowpass cutoff, Hz, at --air-absorption-distance
+//                              and beyond (default 1200)
+//   --air-absorption-max-cutoff  lowpass cutoff, Hz, at/inside the reference
+//                              distance — effectively bypassed (default 20000)
+//   --air-absorption-distance  distance at which the cutoff reaches its
+//                              floor; between the reference distance and
+//                              this, cutoff interpolates linearly
+//                              (default 8.0)
+//   --control-port             UDP port for live updates (see below)
+//   --exit-with-parent         exit if the parent process dies (same
+//                              watchdog pattern as the other pipeline helpers)
 //
 // Control port (UDP, one-line ASCII, e.g. via `nc -u`):
 //   dist <value>   set distance (pad units); ramped in over the next
@@ -56,6 +73,9 @@ struct Options {
     var referenceDistance = 1.0
     var rolloff = 0.8
     var minGain = 0.05
+    var airAbsorptionMinCutoff = 1_200.0
+    var airAbsorptionMaxCutoff = 20_000.0
+    var airAbsorptionDistance = 8.0
     var controlPort: UInt16?
     var exitWithParent = false
 }
@@ -102,6 +122,24 @@ func parseArguments() -> Options {
                 fail("Missing or invalid value for --min-gain (expected 0–1)")
             }
             o.minGain = g
+        case "--air-absorption-min-cutoff":
+            i += 1
+            guard i < args.count, let f = Double(args[i]), f > 0 else {
+                fail("Missing or invalid value for --air-absorption-min-cutoff (expected > 0)")
+            }
+            o.airAbsorptionMinCutoff = f
+        case "--air-absorption-max-cutoff":
+            i += 1
+            guard i < args.count, let f = Double(args[i]), f > 0 else {
+                fail("Missing or invalid value for --air-absorption-max-cutoff (expected > 0)")
+            }
+            o.airAbsorptionMaxCutoff = f
+        case "--air-absorption-distance":
+            i += 1
+            guard i < args.count, let d = Double(args[i]), d > 0 else {
+                fail("Missing or invalid value for --air-absorption-distance (expected > 0)")
+            }
+            o.airAbsorptionDistance = d
         case "--control-port":
             i += 1
             guard i < args.count, let port = UInt16(args[i]), port > 0 else {
@@ -118,6 +156,9 @@ func parseArguments() -> Options {
             fail("Unknown argument '\(args[i])'")
         }
         i += 1
+    }
+    guard o.airAbsorptionDistance > o.referenceDistance else {
+        fail("--air-absorption-distance (\(o.airAbsorptionDistance)) must be greater than --reference-distance (\(o.referenceDistance))")
     }
     return o
 }
@@ -154,6 +195,33 @@ func gain(forDistance distance: Double) -> Double {
     let d = max(distance, options.referenceDistance)
     let raw = pow(options.referenceDistance / d, options.rolloff)
     return max(raw, options.minGain)
+}
+
+// MARK: Air absorption (a lowpass whose cutoff drops with distance)
+//
+// `t` is 0 at/inside the reference distance (bypass) and 1 at/beyond
+// --air-absorption-distance; cutoff interpolates linearly between the two
+// configured extremes. Physically, air absorption's effect in dB scales
+// roughly with distance times a frequency-dependent coefficient — mapping
+// that to a linearly-interpolated *cutoff frequency* rather than modeling
+// the dB curve exactly is a deliberate simplification, same spirit as
+// PCMBinauralPanner's head-shadow cutoff.
+
+/// 0 at/inside the reference distance, 1 at/beyond `airAbsorptionDistance`.
+func airAbsorptionAmount(forDistance distance: Double) -> Double {
+    let span = options.airAbsorptionDistance - options.referenceDistance // > 0, validated at startup
+    let t = (distance - options.referenceDistance) / span
+    return min(max(t, 0), 1)
+}
+
+func airAbsorptionCutoff(forAmount t: Double) -> Double {
+    options.airAbsorptionMaxCutoff - t * (options.airAbsorptionMaxCutoff - options.airAbsorptionMinCutoff)
+}
+
+/// One-pole lowpass coefficient for cutoff `fc` at sample rate `fs` — same
+/// form FMDeemphasis and PCMBinauralPanner use.
+func onePoleAlpha(cutoffHz: Double, sampleRate: Double) -> Double {
+    exp(-2 * .pi * cutoffHz / sampleRate)
 }
 
 // `targetDistance` is read from the control thread and the main loop reads
@@ -241,8 +309,29 @@ if let controlPort = options.controlPort {
 let channels = options.channels
 let bytesPerFrame = channels * MemoryLayout<Int16>.size
 
+// One air-absorption filter state per channel, persistent across chunks.
+var airAbsorptionState = [Double](repeating: 0, count: channels)
+
+/// Applies the air-absorption lowpass only when there's actually absorption
+/// to apply (`amount > 0`); otherwise passes `x` through exactly and keeps
+/// the filter's state caught up to the input — same reasoning as
+/// PCMBinauralPanner's `shadowFiltered`: a one-pole filter at even a
+/// 20 kHz "no absorption" cutoff still measurably softens content above it,
+/// and bypassing avoids both that coloration and any discontinuity if
+/// absorption later ramps up from zero.
+@inline(__always)
+func airAbsorptionFiltered(_ x: Double, channel: Int, alpha: Double, amount: Double) -> Double {
+    guard amount > 0 else {
+        airAbsorptionState[channel] = x
+        return x
+    }
+    airAbsorptionState[channel] = (1 - alpha) * x + alpha * airAbsorptionState[channel]
+    return airAbsorptionState[channel]
+}
+
 note("started — \(Int(options.sampleRate)) Hz \(channels) ch, "
      + "distance \(options.distance) (ref \(options.referenceDistance), rolloff \(options.rolloff), floor \(options.minGain)), "
+     + "air absorption \(options.airAbsorptionMinCutoff)-\(options.airAbsorptionMaxCutoff) Hz by \(options.airAbsorptionDistance), "
      + "stdin → stdout"
      + (options.controlPort.map { ", control port \($0)" } ?? ""))
 
@@ -262,8 +351,18 @@ while !sawEOF {
         let frameCount = processed.count / bytesPerFrame
         guard frameCount > 0 else { return }
 
-        let target = gain(forDistance: targetDistance.get())
+        // Gain still ramps per-frame across the block (see above); air
+        // absorption's cutoff is recomputed once per block too, same
+        // "block-rate parameter update" every other stage here uses — a
+        // filter coefficient change is inaudible as a step at typical block
+        // sizes, and ramping a cutoff sample-by-sample would cost a
+        // transcendental call per sample for no perceptible benefit.
+        let distanceNow = targetDistance.get()
+        let target = gain(forDistance: distanceNow)
         let step = (target - currentGain) / Double(frameCount)
+        let absorptionAmount = airAbsorptionAmount(forDistance: distanceNow)
+        let absorptionCutoff = airAbsorptionCutoff(forAmount: absorptionAmount)
+        let absorptionAlpha = onePoleAlpha(cutoffHz: absorptionCutoff, sampleRate: options.sampleRate)
 
         processed.withUnsafeMutableBytes { rawPtr in
             let samples = rawPtr.bindMemory(to: Int16.self)
@@ -271,7 +370,9 @@ while !sawEOF {
             for frame in 0..<frameCount {
                 for ch in 0..<channels {
                     let index = frame * channels + ch
-                    let scaled = (Double(samples[index]) * g).rounded()
+                    let gained = Double(samples[index]) * g
+                    let filtered = airAbsorptionFiltered(gained, channel: ch, alpha: absorptionAlpha, amount: absorptionAmount)
+                    let scaled = filtered.rounded()
                     samples[index] = Int16(min(max(scaled, -32_768.0), 32_767.0))
                 }
                 g += step
