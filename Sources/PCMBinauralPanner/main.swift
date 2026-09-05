@@ -23,39 +23,71 @@ import Darwin
 // advantage is elevation and front/back cues via pinna spectral notches,
 // which this stage does NOT attempt to reproduce — see the elevation note
 // below. Sits downstream of PCMDistanceGain in the pipeline: distance and
-// direction are independent cues handled by independent stages.
+// direction remain independent cues, but both stages need the current
+// distance for their own distinct purposes — PCMDistanceGain for loudness
+// falloff, this stage for air absorption (see below) — so a distance change
+// is sent to both stages' control ports, computing two different things
+// from the same input rather than one effect duplicated across both.
+//
+// Also applies air absorption: real distance rolls off high frequencies
+// faster than low ones (part of what makes something sound "far" beyond
+// just "quiet"), via a one-pole lowpass on the mono signal before panning,
+// whose cutoff drops as distance grows past the reference distance. This
+// lived in PCMDistanceGain briefly; moved here because it's this stage,
+// not the gain stage, that determines what the listener actually perceives
+// spatially, and running the same distance-driven lowpass in two chained
+// stages would double-apply it rather than compute two distinct things.
 //
 // Usage: PCMBinauralPanner [--rate <Hz>] [--channels <n>]
 //        [--azimuth <deg>] [--elevation <deg>] [--head-radius <m>]
 //        [--ild-depth <0-1>] [--shadow-min-cutoff <Hz>] [--shadow-max-cutoff <Hz>]
-//        [--elevation-shelf-db <dB>] [--control-port <n>] [--exit-with-parent]
+//        [--elevation-shelf-db <dB>] [--distance <d>] [--reference-distance <d>]
+//        [--air-absorption-min-cutoff <Hz>] [--air-absorption-max-cutoff <Hz>]
+//        [--air-absorption-distance <d>] [--control-port <n>] [--exit-with-parent]
 //
-//   --rate                 sample rate in Hz (default 48000)
-//   --channels             input channel count (default 2; downmixed to mono)
-//   --azimuth              initial azimuth, degrees (default 0 = front,
-//                          clockwise-positive: +90 = right, ±180 = rear,
-//                          -90 = left — same convention as the Now Playing
-//                          pad and PCMDistanceGain's neighboring stage)
-//   --elevation            initial elevation, degrees (default 0; -90...90)
-//   --head-radius          meters, for the ITD model (default 0.0875,
-//                          average adult head)
-//   --ild-depth            far-ear level reduction at full pan, 0-1
-//                          (default 0.6 — far ear never fully silenced)
-//   --shadow-min-cutoff    head-shadow lowpass cutoff at full pan, Hz
-//                          (default 1500)
-//   --shadow-max-cutoff    head-shadow lowpass cutoff at az=0 (no shadow —
-//                          effectively bypassed), Hz (default 18000)
-//   --elevation-shelf-db   max high-shelf tilt at ±90° elevation, dB
-//                          (default 4.0) — see the elevation note below
-//   --control-port         UDP port for live updates (see below)
-//   --exit-with-parent     exit if the parent process dies
+//   --rate                     sample rate in Hz (default 48000)
+//   --channels                 input channel count (default 2; downmixed to mono)
+//   --azimuth                  initial azimuth, degrees (default 0 = front,
+//                              clockwise-positive: +90 = right, ±180 = rear,
+//                              -90 = left — same convention as the Now Playing
+//                              pad and PCMDistanceGain's neighboring stage)
+//   --elevation                initial elevation, degrees (default 0; -90...90)
+//   --head-radius              meters, for the ITD model (default 0.0875,
+//                              average adult head)
+//   --ild-depth                far-ear level reduction at full pan, 0-1
+//                              (default 0.6 — far ear never fully silenced)
+//   --shadow-min-cutoff        head-shadow lowpass cutoff at full pan, Hz
+//                              (default 1500)
+//   --shadow-max-cutoff        head-shadow lowpass cutoff at az=0 (no shadow —
+//                              effectively bypassed), Hz (default 18000)
+//   --elevation-shelf-db       max high-shelf tilt at ±90° elevation, dB
+//                              (default 4.0) — see the elevation note below
+//   --distance                 initial distance, pad units (default 1.0 —
+//                              the pad's outer ring, i.e. no air absorption)
+//   --reference-distance       distance at/inside which there's no air
+//                              absorption (default 1.0) — match
+//                              PCMDistanceGain's --reference-distance so
+//                              both stages agree on where "close" ends
+//   --air-absorption-min-cutoff  lowpass cutoff, Hz, at --air-absorption-distance
+//                              and beyond (default 1200)
+//   --air-absorption-max-cutoff  lowpass cutoff, Hz, at/inside the reference
+//                              distance — effectively bypassed (default 20000)
+//   --air-absorption-distance  distance at which the cutoff reaches its
+//                              floor; between the reference distance and
+//                              this, cutoff interpolates linearly
+//                              (default 8.0)
+//   --control-port             UDP port for live updates (see below)
+//   --exit-with-parent         exit if the parent process dies
 //
 // Control port (UDP, one-line ASCII, e.g. via `nc -u`):
 //   az <deg>         set azimuth
 //   el <deg>         set elevation
-//   pos <az> <el>    set both together
-//   pos?             reply with the current azimuth, elevation, and the
-//                    derived ITD (ms) and per-ear gain, for debugging
+//   dist <value>     set distance (drives air absorption only here — send
+//                    the same value to PCMDistanceGain's control port too
+//                    if it's in the pipeline, for loudness falloff)
+//   pos <az> <el>    set azimuth and elevation together
+//   pos?             reply with the current azimuth, elevation, distance,
+//                    and the derived ITD (ms) and per-ear gain, for debugging
 //
 // Elevation note: ITD/ILD panning has no physical mechanism for elevation —
 // real elevation perception comes from pinna spectral notches that only a
@@ -89,6 +121,11 @@ struct Options {
     var shadowMinCutoff = 1_500.0
     var shadowMaxCutoff = 18_000.0
     var elevationShelfDB = 4.0
+    var distance = 1.0
+    var referenceDistance = 1.0
+    var airAbsorptionMinCutoff = 1_200.0
+    var airAbsorptionMaxCutoff = 20_000.0
+    var airAbsorptionDistance = 8.0
     var controlPort: UInt16?
     var exitWithParent = false
 }
@@ -153,6 +190,36 @@ func parseArguments() -> Options {
                 fail("Missing or invalid value for --elevation-shelf-db (expected >= 0)")
             }
             o.elevationShelfDB = d
+        case "--distance":
+            i += 1
+            guard i < args.count, let d = Double(args[i]), d >= 0 else {
+                fail("Missing or invalid value for --distance (expected >= 0)")
+            }
+            o.distance = d
+        case "--reference-distance":
+            i += 1
+            guard i < args.count, let d = Double(args[i]), d > 0 else {
+                fail("Missing or invalid value for --reference-distance (expected > 0)")
+            }
+            o.referenceDistance = d
+        case "--air-absorption-min-cutoff":
+            i += 1
+            guard i < args.count, let f = Double(args[i]), f > 0 else {
+                fail("Missing or invalid value for --air-absorption-min-cutoff (expected > 0)")
+            }
+            o.airAbsorptionMinCutoff = f
+        case "--air-absorption-max-cutoff":
+            i += 1
+            guard i < args.count, let f = Double(args[i]), f > 0 else {
+                fail("Missing or invalid value for --air-absorption-max-cutoff (expected > 0)")
+            }
+            o.airAbsorptionMaxCutoff = f
+        case "--air-absorption-distance":
+            i += 1
+            guard i < args.count, let d = Double(args[i]), d > 0 else {
+                fail("Missing or invalid value for --air-absorption-distance (expected > 0)")
+            }
+            o.airAbsorptionDistance = d
         case "--control-port":
             i += 1
             guard i < args.count, let port = UInt16(args[i]), port > 0 else {
@@ -169,6 +236,9 @@ func parseArguments() -> Options {
             fail("Unknown argument '\(args[i])'")
         }
         i += 1
+    }
+    guard o.airAbsorptionDistance > o.referenceDistance else {
+        fail("--air-absorption-distance (\(o.airAbsorptionDistance)) must be greater than --reference-distance (\(o.referenceDistance))")
     }
     return o
 }
@@ -238,23 +308,43 @@ private func onePoleAlpha(cutoffHz: Double, sampleRate: Double) -> Double {
     exp(-2 * .pi * cutoffHz / sampleRate)
 }
 
+// MARK: Air absorption (a lowpass on the mono signal whose cutoff drops
+// with distance) — see the header note on why this lives here rather than
+// in PCMDistanceGain. Same math as that stage originally used.
+
+/// 0 at/inside the reference distance, 1 at/beyond `airAbsorptionDistance`.
+private func airAbsorptionAmount(forDistance distance: Double) -> Double {
+    let span = options.airAbsorptionDistance - options.referenceDistance // > 0, validated at startup
+    let t = (distance - options.referenceDistance) / span
+    return min(max(t, 0), 1)
+}
+
+private func airAbsorptionCutoff(forAmount t: Double) -> Double {
+    options.airAbsorptionMaxCutoff - t * (options.airAbsorptionMaxCutoff - options.airAbsorptionMinCutoff)
+}
+
 // MARK: Live-updatable target (control thread writes, audio thread reads)
 
 final class DirectionBox {
     private let lock = NSLock()
     private var azimuth: Double
     private var elevation: Double
-    init(azimuth: Double, elevation: Double) {
+    private var distance: Double
+    init(azimuth: Double, elevation: Double, distance: Double) {
         self.azimuth = azimuth
         self.elevation = elevation
+        self.distance = distance
     }
     func setAzimuth(_ value: Double) { lock.lock(); azimuth = value; lock.unlock() }
     func setElevation(_ value: Double) { lock.lock(); elevation = value; lock.unlock() }
+    func setDistance(_ value: Double) { lock.lock(); distance = value; lock.unlock() }
     func setBoth(_ az: Double, _ el: Double) { lock.lock(); azimuth = az; elevation = el; lock.unlock() }
-    func get() -> (az: Double, el: Double) { lock.lock(); defer { lock.unlock() }; return (azimuth, elevation) }
+    func get() -> (az: Double, el: Double, dist: Double) {
+        lock.lock(); defer { lock.unlock() }; return (azimuth, elevation, distance)
+    }
 }
 
-let target = DirectionBox(azimuth: options.azimuth, elevation: options.elevation)
+let target = DirectionBox(azimuth: options.azimuth, elevation: options.elevation, distance: options.distance)
 
 // MARK: Control port (az / el / pos / pos? commands)
 
@@ -298,6 +388,12 @@ func startControlListener(port: UInt16) {
                     } else {
                         note("control: bad value in '\(line)'")
                     }
+                case "dist" where words.count == 2:
+                    if let v = Double(words[1]), v >= 0 {
+                        target.setDistance(v)
+                    } else {
+                        note("control: bad value in '\(line)'")
+                    }
                 case "pos" where words.count == 3:
                     if let az = Double(words[1]), let el = Double(words[2]), (-90...90).contains(el) {
                         target.setBoth(az, el)
@@ -305,10 +401,12 @@ func startControlListener(port: UInt16) {
                         note("control: bad value in '\(line)'")
                     }
                 case "pos?":
-                    let (az, el) = target.get()
+                    let (az, el, dist) = target.get()
                     let d = Direction(azimuthDegrees: az, elevationDegrees: el,
                                       headRadius: options.headRadius, elevationShelfDB: options.elevationShelfDB)
-                    let reply = "az=\(az) el=\(el) itd_ms=\(d.itdSeconds * 1000) shadow=\(d.signedShadow0to1)\n"
+                    let absorption = airAbsorptionAmount(forDistance: dist)
+                    let reply = "az=\(az) el=\(el) dist=\(dist) itd_ms=\(d.itdSeconds * 1000) "
+                              + "shadow=\(d.signedShadow0to1) air_absorption=\(absorption)\n"
                     _ = reply.withCString { cString in
                         withUnsafePointer(to: &sender) { rawSender in
                             rawSender.withMemoryRebound(to: sockaddr.self, capacity: 1) { senderAddr in
@@ -354,6 +452,11 @@ let elevationShelfAlpha = onePoleAlpha(cutoffHz: elevationShelfCornerHz, sampleR
 var leftShelfLPState = 0.0
 var rightShelfLPState = 0.0
 
+// Air-absorption lowpass state — one, applied once to the mono signal
+// before it enters the delay line, since it's a broadband distance effect
+// independent of azimuth (unlike the per-ear shadow filter above).
+var airAbsorptionState = 0.0
+
 @inline(__always)
 func onePole(_ x: Double, state: inout Double, alpha: Double) -> Double {
     state = (1 - alpha) * x + alpha * state
@@ -382,6 +485,16 @@ func shadowFiltered(_ x: Double, state: inout Double, alpha: Double, shadowAmoun
     return x + shadowAmount * (state - x)
 }
 
+/// Same always-run, blend-by-amount shape as `shadowFiltered` (see its own
+/// doc comment for why: a hard bypass branch leaves state stale and
+/// produces a transient snapping back to it) — applied here to the mono
+/// signal for air absorption instead of per-ear for head shadow.
+@inline(__always)
+func airAbsorptionFiltered(_ x: Double, alpha: Double, amount: Double) -> Double {
+    airAbsorptionState = (1 - alpha) * x + alpha * airAbsorptionState
+    return x + amount * (airAbsorptionState - x)
+}
+
 @inline(__always)
 func interpolatedRead(_ pos: Double) -> Double {
     var p = pos.truncatingRemainder(dividingBy: Double(ringSize))
@@ -398,7 +511,8 @@ let inputChannels = options.channels
 let bytesPerInputFrame = inputChannels * MemoryLayout<Int16>.size
 
 note("started — \(Int(options.sampleRate)) Hz, \(inputChannels) ch in (downmixed) → 2 ch out, "
-     + "azimuth \(options.azimuth)° elevation \(options.elevation)° (head radius \(options.headRadius) m), "
+     + "azimuth \(options.azimuth)° elevation \(options.elevation)° distance \(options.distance) "
+     + "(head radius \(options.headRadius) m, air absorption \(options.airAbsorptionMinCutoff)-\(options.airAbsorptionMaxCutoff) Hz by \(options.airAbsorptionDistance)), "
      + "stdin → stdout"
      + (options.controlPort.map { ", control port \($0)" } ?? ""))
 
@@ -420,7 +534,7 @@ while !sawEOF {
         // PCMDistanceGain stage uses. At typical chunk sizes (a few ms to a
         // few hundred ms) this is inaudible as a step and far cheaper than
         // recomputing filter coefficients every sample.
-        let (az, el) = target.get()
+        let (az, el, dist) = target.get()
         let direction = Direction(azimuthDegrees: az, elevationDegrees: el,
                                   headRadius: options.headRadius, elevationShelfDB: options.elevationShelfDB)
         let halfITDSamples = direction.itdSeconds * options.sampleRate / 2
@@ -436,6 +550,10 @@ while !sawEOF {
         let leftGain = 1 - options.ildDepth * leftShadowAmount
         let rightGain = 1 - options.ildDepth * rightShadowAmount
 
+        let airAmount = airAbsorptionAmount(forDistance: dist)
+        let airCutoff = airAbsorptionCutoff(forAmount: airAmount)
+        let airAlpha = onePoleAlpha(cutoffHz: airCutoff, sampleRate: options.sampleRate)
+
         var outData = Data(count: frameCount * 2 * MemoryLayout<Int16>.size) // 2 ch out
         chunk.withUnsafeBytes { rawIn in
             let inSamples = rawIn.bindMemory(to: Int16.self)
@@ -449,6 +567,7 @@ while !sawEOF {
                     }
                     mono /= Double(inputChannels)
                     mono /= 32_768.0
+                    mono = airAbsorptionFiltered(mono, alpha: airAlpha, amount: airAmount)
 
                     ring[writeIndex] = mono
 
