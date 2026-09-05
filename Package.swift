@@ -37,10 +37,13 @@ import PackageDescription
 //                       prep, alongside PCMBinauralPanner); live-adjustable
 //                       over its own UDP control port
 //   • PCMBinauralPanner direction stage: ITD/ILD-based azimuth/elevation
-//                       panning (not measured-HRTF), downmixing to mono and
-//                       emitting true 2-channel binaural output; sits
-//                       downstream of PCMDistanceGain, live-adjustable over
-//                       its own UDP control port
+//                       panning (not measured-HRTF) plus distance-driven air
+//                       absorption, downmixing to mono and emitting true
+//                       2-channel binaural output; sits downstream of
+//                       PCMDistanceGain, live-adjustable over its own UDP
+//                       control port. Both stages take the same `distance`
+//                       value (for loudness and air absorption respectively)
+//                       — a host sends it to both control ports on change.
 //
 // Library products:
 //   • PipelineRunner    TaskPipelineManager + TaskItem — Process-chain
