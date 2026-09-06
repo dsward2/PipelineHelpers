@@ -59,7 +59,16 @@ note("started — \(Int(sampleRate)) Hz / \(channels) ch / τ=\(tauMicroseconds)
 var state = [Double](repeating: 0.0, count: channels)
 let input  = FileHandle.standardInput
 let output = FileHandle.standardOutput
+let bytesPerFrame = channels * MemoryLayout<Int16>.size
 var totalFrames = 0
+
+// `availableData` only lands on a frame boundary when the upstream stage writes
+// frame-aligned blocks. A PCMUDPReceiver ahead of us writes each datagram
+// payload verbatim, so a read routinely ends 1–3 bytes into a frame. Without a
+// carry, `i % channels` then assigns the wrong filter state to each channel
+// from that read on, and a trailing odd byte passes through unfiltered. Carry
+// the partial frame into the next read.
+var carry = Data()
 
 var sawEOF = false
 while !sawEOF {
@@ -68,9 +77,14 @@ while !sawEOF {
     autoreleasepool {
         let chunk = input.availableData
         if chunk.isEmpty { sawEOF = true; return }  // EOF: upstream closed
+        carry.append(chunk)
 
-        // Work on a mutable copy so we can re-interpret bytes as Int16 in place.
-        var processed = chunk
+        let frameCount = carry.count / bytesPerFrame
+        guard frameCount > 0 else { return }
+
+        // Work on a mutable copy of the whole frames so we can re-interpret
+        // bytes as Int16 in place; the partial frame stays in `carry`.
+        var processed = Data(carry.prefix(frameCount * bytesPerFrame))
         processed.withUnsafeMutableBytes { rawPtr in
             let samples = rawPtr.bindMemory(to: Int16.self)
             for i in 0..<samples.count {
@@ -86,6 +100,7 @@ while !sawEOF {
         }
 
         output.write(processed)
+        carry.removeFirst(frameCount * bytesPerFrame)
     }
 }
 

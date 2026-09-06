@@ -257,6 +257,14 @@ let input = FileHandle.standardInput
 let output = FileHandle.standardOutput
 var totalFrames = 0
 
+// `availableData` only lands on a frame boundary when the upstream stage writes
+// frame-aligned blocks. A PCMUDPReceiver ahead of us writes each datagram
+// payload verbatim, so a read routinely ends 1–3 bytes into a frame. Carry the
+// partial frame into the next read: at unity gain the old code passed those
+// bytes through untouched, but any non-unity gain reinterpreted the next
+// chunk's misaligned bytes as samples — S16LE static.
+var carry = Data()
+
 var sawEOF = false
 while !sawEOF {
     // availableData returns an autoreleased NSData; this loop runs no run
@@ -264,10 +272,11 @@ while !sawEOF {
     autoreleasepool {
         let chunk = input.availableData
         if chunk.isEmpty { sawEOF = true; return }   // EOF: upstream closed.
+        carry.append(chunk)
 
-        var processed = chunk
-        let frameCount = processed.count / bytesPerFrame
+        let frameCount = carry.count / bytesPerFrame
         guard frameCount > 0 else { return }
+        var processed = Data(carry.prefix(frameCount * bytesPerFrame))
 
         let target = gain(forDistance: targetDistance.get())
         let step = (target - currentGain) / Double(frameCount)
@@ -288,6 +297,7 @@ while !sawEOF {
         totalFrames += frameCount
 
         output.write(processed)
+        carry.removeFirst(frameCount * bytesPerFrame)
     }
 }
 
