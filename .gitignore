@@ -1,3 +1,6 @@
 .build/
 .swiftpm/
 .DS_Store
+
+# LLVM coverage droppings from running instrumented test binaries
+*.profraw
