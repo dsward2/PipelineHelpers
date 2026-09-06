@@ -18,11 +18,24 @@ import Darwin
 // Usage: PCMMixer --input stdin --input udp:<port> [--input udp:<port> …]
 //        [--output udp:<host>:<port>] [--control-port <n>]
 //        [--gain <i>=<g> …] [--ratio <0..1>] [--exit-with-parent]
+//        [--rate <hz>] [--channels <n>]
+//        [--duck-input <i>] [--duck-threshold <0..1>] [--duck-attenuation <0..1>]
+//        [--duck-attack-ms <n>] [--duck-release-ms <n>] [--duck-hold-ms <n>]
 //
 // Control port (UDP, one-line ASCII commands, e.g. via `nc -u`):
 //   ratio <0..1>     crossfade inputs 0/1 (gain0 = 1−r, gain1 = r)
 //   gain <i> <g>     set input i's gain (g ≥ 0; > 1 amplifies)
 //   gains            reply to the sender with the current gain list
+//
+// Sidechain ducking (--duck-input): when input <i>'s level rises above
+// --duck-threshold, every OTHER input is attenuated toward --duck-attenuation
+// with an --duck-attack-ms / --duck-release-ms one-pole envelope (and held
+// ducked for at least --duck-hold-ms after the trigger falls back below the
+// threshold, so brief gaps between words don't pump). Input <i> itself is
+// passed through un-ducked. Used to drop the AntennaHead filler bed under a
+// periodic spoken announcement. --rate / --channels (default 48000 / 2) only
+// feed the envelope's time base; they do not touch the mix math. With no
+// --duck-input the helper mixes exactly as before.
 //
 // sox `-m` mixes with volumes fixed at launch; this helper exists for the
 // dynamic control.
@@ -58,6 +71,18 @@ struct Options {
     var initialGains: [Int: Double] = [:]
     var initialRatio: Double?
     var exitWithParent = false
+
+    // Envelope time base for ducking (not used by the mix math itself).
+    var sampleRate = 48_000.0
+    var channels = 2
+
+    // Sidechain ducking. `duckInput == nil` ⇒ feature off, mix unchanged.
+    var duckInput: Int?
+    var duckThreshold = 0.02        // trigger level, fraction of full scale (~−34 dBFS)
+    var duckAttenuation = 0.25      // gain the other inputs fall to while ducked (~−12 dB)
+    var duckAttackMs = 40.0
+    var duckReleaseMs = 400.0
+    var duckHoldMs = 250.0
 }
 
 func parseArguments() -> Options {
@@ -112,6 +137,54 @@ func parseArguments() -> Options {
                 fail("Missing or invalid value for --ratio (expected 0..1)")
             }
             o.initialRatio = ratio
+        case "--rate":
+            i += 1
+            guard i < args.count, let rate = Double(args[i]), rate > 0 else {
+                fail("Missing or invalid value for --rate (expected > 0)")
+            }
+            o.sampleRate = rate
+        case "--channels":
+            i += 1
+            guard i < args.count, let channels = Int(args[i]), channels > 0 else {
+                fail("Missing or invalid value for --channels (expected > 0)")
+            }
+            o.channels = channels
+        case "--duck-input":
+            i += 1
+            guard i < args.count, let index = Int(args[i]), index >= 0 else {
+                fail("Missing or invalid value for --duck-input (expected an input index)")
+            }
+            o.duckInput = index
+        case "--duck-threshold":
+            i += 1
+            guard i < args.count, let v = Double(args[i]), (0.0...1.0).contains(v) else {
+                fail("Missing or invalid value for --duck-threshold (expected 0..1)")
+            }
+            o.duckThreshold = v
+        case "--duck-attenuation":
+            i += 1
+            guard i < args.count, let v = Double(args[i]), (0.0...1.0).contains(v) else {
+                fail("Missing or invalid value for --duck-attenuation (expected 0..1)")
+            }
+            o.duckAttenuation = v
+        case "--duck-attack-ms":
+            i += 1
+            guard i < args.count, let v = Double(args[i]), v >= 0 else {
+                fail("Missing or invalid value for --duck-attack-ms (expected ≥ 0)")
+            }
+            o.duckAttackMs = v
+        case "--duck-release-ms":
+            i += 1
+            guard i < args.count, let v = Double(args[i]), v >= 0 else {
+                fail("Missing or invalid value for --duck-release-ms (expected ≥ 0)")
+            }
+            o.duckReleaseMs = v
+        case "--duck-hold-ms":
+            i += 1
+            guard i < args.count, let v = Double(args[i]), v >= 0 else {
+                fail("Missing or invalid value for --duck-hold-ms (expected ≥ 0)")
+            }
+            o.duckHoldMs = v
         case "--exit-with-parent":
             o.exitWithParent = true
         default:
@@ -122,6 +195,9 @@ func parseArguments() -> Options {
     guard o.inputs.count >= 2 else { fail("At least two --input sources are required") }
     guard o.inputs.filter({ if case .stdin = $0 { return true } else { return false } }).count <= 1 else {
         fail("Only one --input may be stdin")
+    }
+    if let duckInput = o.duckInput, !o.inputs.indices.contains(duckInput) {
+        fail("--duck-input \(duckInput) is out of range (0..<\(o.inputs.count))")
     }
     return o
 }
@@ -392,14 +468,46 @@ func writeOutput(_ data: Data) {
     }
 }
 
+// MARK: Sidechain ducking
+
+/// Peak absolute sample in `data`, as a fraction of full scale (0…1).
+func peakNorm(_ data: Data) -> Double {
+    data.withUnsafeBytes { raw -> Double in
+        let samples = raw.bindMemory(to: Int16.self)
+        var peak: Int32 = 0
+        for v in samples { peak = max(peak, abs(Int32(v))) }
+        return Double(peak) / 32_768.0
+    }
+}
+
+/// One-pole coefficient to move `dt` seconds toward a target with time
+/// constant `tc` seconds. `tc <= 0` ⇒ snap.
+func onePoleCoeff(dt: Double, tc: Double) -> Double {
+    tc <= 0 ? 1.0 : 1.0 - exp(-dt / tc)
+}
+
+let duckIndex = options.duckInput ?? -1
+let duckAttackSeconds = options.duckAttackMs / 1_000.0
+let duckReleaseSeconds = options.duckReleaseMs / 1_000.0
+let duckHoldSeconds = options.duckHoldMs / 1_000.0
+/// Current gain multiplier applied to every non-sidechain input. 1.0 = open.
+var duckEnvelope = 1.0
+/// Seconds still to stay ducked after the trigger last fell below threshold.
+var duckHoldRemaining = 0.0
+
 // MARK: Mix loop
 //
 // Read a chunk from input 0, pop the same byte count from every other input's
-// FIFO (silence-padded), apply gains, saturate, and write downstream.
+// FIFO (silence-padded), apply gains (and the duck envelope to every input
+// other than the sidechain), saturate, and write downstream.
 
 let inputLabels = options.inputs.map(\.label).joined(separator: ", ")
 note("started — mixing [\(inputLabels)] → \(options.outputUDP.map { "udp:\($0.host):\($0.port)" } ?? "stdout")"
-     + (options.controlPort.map { ", control port \($0)" } ?? ""))
+     + (options.controlPort.map { ", control port \($0)" } ?? "")
+     + (options.duckInput.map {
+         ", ducking input \($0) (threshold \(options.duckThreshold), floor \(options.duckAttenuation), "
+         + "attack \(Int(options.duckAttackMs)) ms, release \(Int(options.duckReleaseMs)) ms)"
+     } ?? ""))
 
 let masterBufferSize = 65_536
 let masterBuffer = UnsafeMutableRawPointer.allocate(byteCount: masterBufferSize, alignment: 1)
@@ -436,7 +544,30 @@ while true {
     let sampleCount = chunk.count / 2
     let gains = gainTable.snapshot()
 
-    // Accumulate gained samples in Int32, master first, then each FIFO.
+    // Pop this chunk's worth from every non-master input up front, so the
+    // sidechain's data is in hand before we compute the duck envelope.
+    let fifoChunks: [Data?] = fifos.map { $0?.pop(chunk.count) }
+
+    // Advance the duck envelope once per chunk (chunk ≈ 20 ms at the filler's
+    // 4 KiB paced writes — fine-grained enough for a smooth ramp).
+    if options.duckInput != nil {
+        let sidechainData = duckIndex == 0 ? chunk : (fifoChunks[duckIndex] ?? Data())
+        let level = peakNorm(sidechainData)
+        let frames = Double(sampleCount) / Double(max(1, options.channels))
+        let dt = frames / options.sampleRate
+        if level >= options.duckThreshold {
+            duckHoldRemaining = duckHoldSeconds
+        } else {
+            duckHoldRemaining = max(0, duckHoldRemaining - dt)
+        }
+        let target = (level >= options.duckThreshold || duckHoldRemaining > 0)
+            ? options.duckAttenuation : 1.0
+        let tc = target < duckEnvelope ? duckAttackSeconds : duckReleaseSeconds
+        duckEnvelope += (target - duckEnvelope) * onePoleCoeff(dt: dt, tc: tc)
+    }
+
+    // Accumulate gained samples in Int32, master first, then each FIFO. Every
+    // input except the sidechain also gets the duck envelope.
     var acc = [Int32](repeating: 0, count: sampleCount)
     func accumulate(_ data: Data, gain: Double) {
         guard gain != 0 else { return }
@@ -447,10 +578,10 @@ while true {
             }
         }
     }
-    accumulate(chunk, gain: gains[0])
-    for (index, fifo) in fifos.enumerated() {
-        guard let fifo else { continue }
-        accumulate(fifo.pop(chunk.count), gain: gains[index])
+    accumulate(chunk, gain: gains[0] * (duckIndex == 0 ? 1.0 : duckEnvelope))
+    for (index, data) in fifoChunks.enumerated() {
+        guard let data else { continue }
+        accumulate(data, gain: gains[index] * (index == duckIndex ? 1.0 : duckEnvelope))
     }
 
     // Saturate to Int16 and write downstream.

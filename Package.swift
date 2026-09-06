@@ -135,6 +135,9 @@ let package = Package(
         // the package first, so the binaries are on disk next to the xctest
         // bundle; the test resolves that directory rather than link the
         // executables in.
-        .testTarget(name: "HelperStreamAlignmentTests")
+        .testTarget(name: "HelperStreamAlignmentTests"),
+        // Spawns the built PCMMixer (and PCMUDPSender) to exercise the
+        // --duck-input sidechain ducker end to end.
+        .testTarget(name: "PCMMixerDuckingTests")
     ]
 )
