@@ -126,6 +126,15 @@ let package = Package(
         ),
         .executableTarget(name: "PCMTranscriber"),
         .executableTarget(name: "PCMDistanceGain"),
-        .executableTarget(name: "PCMBinauralPanner")
+        .executableTarget(name: "PCMBinauralPanner"),
+        // Spawns the built stream-processing helpers and feeds them
+        // deliberately non-frame-aligned writes (as a PCMUDPReceiver ahead of
+        // them does) to prove they carry the partial frame instead of
+        // dropping it — the bug that turned a ControlBooth broadcast into
+        // alternating speech and static. `swift test` builds every product in
+        // the package first, so the binaries are on disk next to the xctest
+        // bundle; the test resolves that directory rather than link the
+        // executables in.
+        .testTarget(name: "HelperStreamAlignmentTests")
     ]
 )

@@ -116,9 +116,19 @@ if let path = aacPath, let handle = openForWriting(path) {
 
 let input = FileHandle.standardInput
 let output = FileHandle.standardOutput
+let bytesPerFrame = channels * MemoryLayout<Int16>.size
 var totalBytes = 0
 
 note("started — \(sampleRate) Hz / \(channels) ch")
+
+// The stdout passthrough is byte-exact and must stay immediate, but the
+// encoders bind the chunk as `Int16` and expect whole interleaved frames.
+// `availableData` ends mid-frame whenever the upstream stage writes
+// non-frame-aligned blocks (e.g. a PCMUDPReceiver forwarding datagram
+// payloads), which would drop the odd trailing byte from the encoder feed
+// only and drift the recorded file's channels. Feed the encoders from a
+// frame-aligned carry instead.
+var encoderCarry = Data()
 
 var sawEOF = false
 while !sawEOF {
@@ -130,11 +140,16 @@ while !sawEOF {
         output.write(chunk)
         totalBytes += chunk.count
 
-        chunk.withUnsafeBytes { rawPtr in
+        encoderCarry.append(chunk)
+        let wholeBytes = (encoderCarry.count / bytesPerFrame) * bytesPerFrame
+        guard wholeBytes > 0 else { return }
+        let block = Data(encoderCarry.prefix(wholeBytes))
+        block.withUnsafeBytes { rawPtr in
             let samples = rawPtr.bindMemory(to: Int16.self)
             mp3Encoder?.encode(samples: samples)
             aacEncoder?.encode(samples: samples)
         }
+        encoderCarry.removeFirst(wholeBytes)
     }
 }
 

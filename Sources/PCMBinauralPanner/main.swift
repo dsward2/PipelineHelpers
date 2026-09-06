@@ -520,13 +520,23 @@ let input = FileHandle.standardInput
 let output = FileHandle.standardOutput
 var totalFrames = 0
 
+// `availableData` hands back whatever bytes have arrived, which is only a whole
+// number of frames when the upstream stage writes frame-aligned blocks. A
+// PCMUDPReceiver ahead of us writes each datagram payload verbatim, so a read
+// routinely ends 1–3 bytes into a frame. Rebuilding output from just
+// `chunk.count / bytesPerInputFrame` frames used to discard that remainder
+// every read, shifting every later S16LE sample by an odd byte count —
+// white-noise static. Carry the partial frame into the next read instead.
+var carry = Data()
+
 var sawEOF = false
 while !sawEOF {
     autoreleasepool {
         let chunk = input.availableData
         if chunk.isEmpty { sawEOF = true; return }   // EOF: upstream closed.
+        carry.append(chunk)
 
-        let frameCount = chunk.count / bytesPerInputFrame
+        let frameCount = carry.count / bytesPerInputFrame
         guard frameCount > 0 else { return }
 
         // Recompute direction-derived coefficients once per chunk, not per
@@ -555,7 +565,7 @@ while !sawEOF {
         let airAlpha = onePoleAlpha(cutoffHz: airCutoff, sampleRate: options.sampleRate)
 
         var outData = Data(count: frameCount * 2 * MemoryLayout<Int16>.size) // 2 ch out
-        chunk.withUnsafeBytes { rawIn in
+        carry.withUnsafeBytes { rawIn in
             let inSamples = rawIn.bindMemory(to: Int16.self)
             outData.withUnsafeMutableBytes { rawOut in
                 let outSamples = rawOut.bindMemory(to: Int16.self)
@@ -599,6 +609,7 @@ while !sawEOF {
 
         totalFrames += frameCount
         output.write(outData)
+        carry.removeFirst(frameCount * bytesPerInputFrame)
     }
 }
 
