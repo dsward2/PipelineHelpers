@@ -138,6 +138,9 @@ let package = Package(
         .testTarget(name: "HelperStreamAlignmentTests"),
         // Spawns the built PCMMixer (and PCMUDPSender) to exercise the
         // --duck-input sidechain ducker end to end.
-        .testTarget(name: "PCMMixerDuckingTests")
+        .testTarget(name: "PCMMixerDuckingTests"),
+        // Spawns the built PCMUDPSender and inspects its datagram sizes to
+        // prove it never splits an S16 frame across a datagram boundary.
+        .testTarget(name: "PCMUDPSenderFramingTests")
     ]
 )

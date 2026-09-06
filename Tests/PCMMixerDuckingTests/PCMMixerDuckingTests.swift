@@ -93,7 +93,16 @@ final class PCMMixerDuckingTests: XCTestCase {
         var sinceSleep = 0
         while offset < payload.count {
             let n = min(2_048, payload.count - offset)
-            let sent = payload.withUnsafeBytes { send(fd, $0.baseAddress!.advanced(by: offset), n, 0) }
+            var sent = payload.withUnsafeBytes { send(fd, $0.baseAddress!.advanced(by: offset), n, 0) }
+            // A connected UDP socket returns ECONNREFUSED for a short window
+            // after the peer binds (ICMP port-unreachable from an in-flight
+            // earlier datagram). Retry briefly rather than fail the test.
+            var tries = 0
+            while sent < 0 && errno == ECONNREFUSED && tries < 40 {
+                Thread.sleep(forTimeInterval: 0.025)
+                sent = payload.withUnsafeBytes { send(fd, $0.baseAddress!.advanced(by: offset), n, 0) }
+                tries += 1
+            }
             XCTAssertEqual(sent, n, "short UDP send: \(String(cString: strerror(errno)))")
             offset += n
             sinceSleep += n
@@ -126,7 +135,7 @@ final class PCMMixerDuckingTests: XCTestCase {
 
         // Push the whole sidechain in ahead of the master so output frame N
         // lines up with sidechain frame N by byte offset, not wall clock.
-        Thread.sleep(forTimeInterval: 0.2)   // let the mixer bind its UDP input
+        Thread.sleep(forTimeInterval: 0.5)   // let the mixer bind its UDP input
         sendUDP(sidechain, toPort: port)
         Thread.sleep(forTimeInterval: 0.3)   // let the FIFO reader drain the socket
 
