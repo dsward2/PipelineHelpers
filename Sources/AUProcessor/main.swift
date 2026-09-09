@@ -587,7 +587,6 @@ while !sawEOF {
         var frameOffset = 0
         while frameOffset < wholeFrames {
             let frames = min(wholeFrames - frameOffset, Int(maxFrames))
-            // Data keeps its indices after removeFirst, so range from startIndex.
             let byteStart = carry.startIndex + frameOffset * bytesPerFrame
             fillPending(from: carry.subdata(in: byteStart..<(byteStart + frames * bytesPerFrame)))
             pendingOffset = 0
@@ -602,7 +601,13 @@ while !sawEOF {
             writeStdout(s16Data(from: renderedBuffer))
             frameOffset += frames
         }
-        carry.removeFirst(wholeFrames * bytesPerFrame)
+
+        // Drop the consumed frames by rebuilding `carry` from a fresh copy of
+        // the sub-frame remainder (0–3 bytes). `Data.removeFirst` only advances
+        // the slice's start index — it never releases the consumed prefix's
+        // backing allocation, so `append` + `removeFirst` on a long-lived `Data`
+        // grows without bound at the input data rate.
+        carry = Data(Array(carry.dropFirst(wholeFrames * bytesPerFrame)))
     }
 }
 
