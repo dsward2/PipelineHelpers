@@ -297,7 +297,14 @@ while !sawEOF {
         totalFrames += frameCount
 
         output.write(processed)
-        carry.removeFirst(frameCount * bytesPerFrame)
+
+        // Drop the consumed frames by rebuilding `carry` from a fresh copy of
+        // the sub-frame remainder (0–3 bytes). `Data.removeFirst` only advances
+        // the slice's start index — it never releases the consumed prefix's
+        // backing allocation, so `append` + `removeFirst` on a long-lived `Data`
+        // grows without bound at the input data rate (observed: 1+ GB after a
+        // few hours, multiple GB overnight).
+        carry = Data(Array(carry.dropFirst(frameCount * bytesPerFrame)))
     }
 }
 

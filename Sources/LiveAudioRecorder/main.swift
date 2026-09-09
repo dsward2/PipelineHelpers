@@ -149,7 +149,12 @@ while !sawEOF {
             mp3Encoder?.encode(samples: samples)
             aacEncoder?.encode(samples: samples)
         }
-        encoderCarry.removeFirst(wholeBytes)
+        // Drop the consumed bytes by rebuilding `encoderCarry` from a fresh copy
+        // of the sub-frame remainder (0–3 bytes). `Data.removeFirst` only
+        // advances the slice's start index — it never releases the consumed
+        // prefix's backing allocation, so `append` + `removeFirst` on a
+        // long-lived `Data` grows without bound at the input data rate.
+        encoderCarry = Data(Array(encoderCarry.dropFirst(wholeBytes)))
     }
 }
 

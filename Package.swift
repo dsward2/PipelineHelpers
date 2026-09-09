@@ -136,6 +136,12 @@ let package = Package(
         // bundle; the test resolves that directory rather than link the
         // executables in.
         .testTarget(name: "HelperStreamAlignmentTests"),
+        // Spawns the built stdin→stdout DSP helpers, streams a large volume of
+        // PCM through them in many small writes, and samples each helper's
+        // phys_footprint. Guards the frame-carry buffer against the
+        // `Data.append` + `Data.removeFirst` growth that let PCMDistanceGain /
+        // PCMBinauralPanner reach multiple GB over an overnight run.
+        .testTarget(name: "HelperMemoryBoundsTests"),
         // Spawns the built PCMMixer (and PCMUDPSender) to exercise the
         // --duck-input sidechain ducker end to end.
         .testTarget(name: "PCMMixerDuckingTests"),
