@@ -261,6 +261,40 @@ func emit(type: String, text: String, start: Double?, end: Double?) {
 
 // MARK: - Recognition engine (macOS 26 SpeechAnalyzer / SpeechTranscriber)
 
+/// Bridges the stdin tee (started immediately, below) to the recognizer,
+/// which becomes ready only after `runTranscription`'s async startup — model
+/// reservation/install, format negotiation, `analyzer.start()` — completes.
+/// Before `activate(...)` is called, `feed(_:)` is a no-op: audio still
+/// passes through to stdout unconditionally, it just isn't transcribed yet.
+///
+/// This is what lets the tee start before that setup instead of waiting on
+/// it. PCMTranscriber sits mid-pipeline, so previously nothing drained its
+/// stdin while setup ran — once the OS pipe filled, every upstream stage
+/// (PCMPrefix, sox, even rtl_fm) blocked on write(), waiting for it. Measured
+/// as a 233ms stall coinciding with a transcriber's startup during the
+/// 2026-09-14 choppy-audio investigation.
+final class RecognizeFeed: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: ((Data) -> Void)?
+    private var onFinish: (() -> Void)?
+
+    func activate(handler: @escaping (Data) -> Void, onFinish: @escaping () -> Void) {
+        lock.withLock { self.handler = handler; self.onFinish = onFinish }
+    }
+
+    func feed(_ data: Data) {
+        lock.withLock { handler }?(data)
+    }
+
+    /// The recognizer's finish closure, if it had become ready before stdin
+    /// closed — nil means nothing was ever transcribing, so the caller
+    /// should just exit rather than try to finalize a recognizer that was
+    /// never started.
+    func onFinishIfActive() -> (() -> Void)? {
+        lock.withLock { onFinish }
+    }
+}
+
 @available(macOS 26, *)
 func runTranscription(_ options: Options) async {
     let locale = Locale(identifier: options.locale)
@@ -272,8 +306,39 @@ func runTranscription(_ options: Options) async {
         attributeOptions: [.audioTimeRange]
     )
 
+    // Blocking stdin → stdout tee, on its own thread, started now rather than
+    // after the recognizer setup below — see RecognizeFeed's doc comment.
+    let recognizeFeed = RecognizeFeed()
+    let stdinHandle = FileHandle.standardInput
+    let stdoutHandle = FileHandle.standardOutput
+    Thread.detachNewThread {
+        var total = 0
+        var sawEOF = false
+        while !sawEOF {
+            // availableData / write produce autoreleased temporaries, and this
+            // thread runs no run loop to drain the pool. Without an explicit
+            // pool per iteration they accumulate for the life of the process.
+            autoreleasepool {
+                let chunk = stdinHandle.availableData
+                if chunk.isEmpty { sawEOF = true; return }   // EOF: upstream closed
+                stdoutHandle.write(chunk)                     // lossless passthrough — always first
+                total += chunk.count
+                recognizeFeed.feed(chunk)
+            }
+        }
+        if let onFinish = recognizeFeed.onFinishIfActive() {
+            note("stdin closed — \(total) bytes passed through; finalizing transcript")
+            onFinish()
+        } else {
+            note("stdin closed — \(total) bytes passed through; recognizer never became ready, nothing to finalize")
+            exit(0)
+        }
+    }
+
     // Reserve + install the on-device model for this locale. First run may need
-    // the network; afterwards recognition is fully offline.
+    // the network; afterwards recognition is fully offline. The tee above is
+    // already passing stdin through while this runs, so it can't stall the
+    // upstream pipeline the way it used to.
     _ = try? await AssetInventory.reserve(locale: locale)
     do {
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
@@ -385,37 +450,24 @@ func runTranscription(_ options: Options) async {
     note("started — \(Int(options.inputRate)) Hz / \(options.inputChannels) ch in, "
          + "\(Int(analyzerFormat.sampleRate)) Hz to the recognizer")
 
-    // Blocking stdin → stdout tee on its own thread; also feeds the recognizer.
-    let stdinHandle = FileHandle.standardInput
-    let stdoutHandle = FileHandle.standardOutput
-    Thread.detachNewThread {
-        var total = 0
-        var dropped = 0
-        var sawEOF = false
-        while !sawEOF {
-            // availableData / write / the AVFoundation conversion produce
-            // autoreleased temporaries, and this thread runs no run loop to
-            // drain the pool. Without an explicit pool per iteration they
-            // accumulate for the life of the process.
-            autoreleasepool {
-                let chunk = stdinHandle.availableData
-                if chunk.isEmpty { sawEOF = true; return }   // EOF: upstream closed
-                stdoutHandle.write(chunk)                     // lossless passthrough — always first
-                total += chunk.count
-                if let buffer = makePCMBuffer(chunk), let converted = convert(buffer) {
-                    if case .dropped = inputBuilder.yield(AnalyzerInput(buffer: converted)) {
-                        dropped += 1
-                        if dropped.isMultiple(of: 128) {
-                            note("recognizer behind real time — dropped \(dropped) audio chunks")
-                        }
-                    }
-                }
+    // The recognizer is ready — start actually feeding it. The tee thread
+    // above has been passing stdin through to stdout since the process
+    // launched; whatever arrived during the setup above was passed through
+    // but not transcribed (an acceptable gap, same tradeoff the drop-under-
+    // backlog path below already makes when the recognizer falls behind).
+    var dropped = 0
+    recognizeFeed.activate(handler: { chunk in
+        guard let buffer = makePCMBuffer(chunk), let converted = convert(buffer) else { return }
+        if case .dropped = inputBuilder.yield(AnalyzerInput(buffer: converted)) {
+            dropped += 1
+            if dropped.isMultiple(of: 128) {
+                note("recognizer behind real time — dropped \(dropped) audio chunks")
             }
         }
-        note("stdin closed — \(total) bytes passed through; finalizing transcript")
+    }, onFinish: {
         inputBuilder.finish()
         Task { try? await analyzer.finalizeAndFinishThroughEndOfInput() }
-    }
+    })
 
     // Drain results until finalize completes and the stream ends.
     do {
