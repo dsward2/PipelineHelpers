@@ -124,9 +124,18 @@ public final class TaskItem {
             return
         }
         task.terminate()
-        stderrPipe?.fileHandleForReading.readabilityHandler = nil
-        stderrPipe = nil
         process = nil
+        // Don't close our read end of the child's stderr pipe yet: SIGTERM
+        // only *requests* the exit, and an anonymous pipe's writer gets
+        // EPIPE the instant its last reader disappears. A helper that logs
+        // its own shutdown (e.g. PCMPrefix's "stdin closed..." message,
+        // written via FileHandle.write) hits that EPIPE as an uncaught
+        // NSFileHandleOperationException and aborts instead of exiting
+        // cleanly — see PCMPrefix's 2026-09 crash reports. Keep the pipe
+        // (and its readabilityHandler, so any final lines still get
+        // relayed) alive until the child has actually exited.
+        let pipeToClose = stderrPipe
+        stderrPipe = nil
         // Wait for graceful exit off the main thread; SIGKILL after 2 seconds if needed.
         Task.detached {
             let deadline = ContinuousClock.now.advanced(by: .seconds(2.0))
@@ -135,6 +144,15 @@ public final class TaskItem {
             }
             if task.isRunning {
                 kill(task.processIdentifier, SIGKILL)
+                // Give SIGKILL a moment to actually land before we close the
+                // pipe out from under it.
+                let killDeadline = ContinuousClock.now.advanced(by: .milliseconds(200))
+                while task.isRunning && ContinuousClock.now < killDeadline {
+                    try? await Task.sleep(until: .now.advanced(by: .milliseconds(20)), clock: .continuous)
+                }
+            }
+            await MainActor.run {
+                pipeToClose?.fileHandleForReading.readabilityHandler = nil
             }
         }
     }
@@ -163,9 +181,12 @@ public final class TaskItem {
             return
         }
         task.terminate()
-        stderrPipe?.fileHandleForReading.readabilityHandler = nil
-        stderrPipe = nil
         process = nil
+        // See terminate(): keep the read end of the child's stderr pipe open
+        // until it has actually exited, so its own shutdown logging can't
+        // EPIPE against a reader we already tore down.
+        let pipeToClose = stderrPipe
+        stderrPipe = nil
         let deadline = Date().addingTimeInterval(timeout)
         while task.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.05)
@@ -177,6 +198,7 @@ public final class TaskItem {
                 Thread.sleep(forTimeInterval: 0.05)
             }
         }
+        pipeToClose?.fileHandleForReading.readabilityHandler = nil
     }
 
     public func taskInfoString() -> String {
