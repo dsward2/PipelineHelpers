@@ -129,4 +129,12 @@ final class HelperMemoryBoundsTests: XCTestCase {
                           ["--rate", "48000", "--channels", "2",
                            "--azimuth", "0", "--elevation", "0", "--distance", "1.0"])
     }
+
+    // PCMDelay's ring buffer is fixed at --max-delay seconds (~11.5 MB at the
+    // default), so unlike the carry buffers above it starts larger — but it
+    // must still stay flat however much audio passes through.
+    func test_pcmDelay_footprintStaysBounded() throws {
+        try assertBounded("PCMDelay",
+                          ["--rate", "48000", "--channels", "2", "--delay", "5.0"])
+    }
 }

@@ -45,6 +45,11 @@ import PackageDescription
 //                       value (for loudness and air absorption respectively)
 //                       — a host sends it to both control ports on change.
 //
+//   • PCMDelay          adjustable time delay (circular buffer, 0…--max-delay
+//                       seconds) for lining a radio broadcast up with a
+//                       lagging TV picture; click-free live changes over its
+//                       own UDP control port, so a UI slider can drive it
+//
 // Library products:
 //   • PipelineRunner    TaskPipelineManager + TaskItem — Process-chain
 //                       assembly/teardown used by both apps (previously
@@ -80,7 +85,8 @@ let package = Package(
         .executable(name: "LiveAudioRecorder", targets: ["LiveAudioRecorder"]),
         .executable(name: "PCMTranscriber", targets: ["PCMTranscriber"]),
         .executable(name: "PCMDistanceGain", targets: ["PCMDistanceGain"]),
-        .executable(name: "PCMBinauralPanner", targets: ["PCMBinauralPanner"])
+        .executable(name: "PCMBinauralPanner", targets: ["PCMBinauralPanner"]),
+        .executable(name: "PCMDelay", targets: ["PCMDelay"])
     ],
     targets: [
         .target(name: "PipelineRunner"),
@@ -127,6 +133,7 @@ let package = Package(
         .executableTarget(name: "PCMTranscriber"),
         .executableTarget(name: "PCMDistanceGain"),
         .executableTarget(name: "PCMBinauralPanner"),
+        .executableTarget(name: "PCMDelay"),
         // Spawns the built stream-processing helpers and feeds them
         // deliberately non-frame-aligned writes (as a PCMUDPReceiver ahead of
         // them does) to prove they carry the partial frame instead of
@@ -147,6 +154,9 @@ let package = Package(
         .testTarget(name: "PCMMixerDuckingTests"),
         // Spawns the built PCMUDPSender and inspects its datagram sizes to
         // prove it never splits an S16 frame across a datagram boundary.
-        .testTarget(name: "PCMUDPSenderFramingTests")
+        .testTarget(name: "PCMUDPSenderFramingTests"),
+        // Spawns the built PCMDelay and checks the delayed output sample-exact,
+        // plus live delay changes over its UDP control port.
+        .testTarget(name: "PCMDelayTests")
     ]
 )
