@@ -610,8 +610,9 @@ public enum PipelineHelperCatalog {
                 ),
                 PipelineHelperOption(
                     flag: "--max-delay", kind: .double(0.0...600.0),
-                    summary: "Largest delay accepted, in seconds; sets the buffer size "
-                        + "(60 s of 48 kHz stereo is ~11.5 MB).",
+                    summary: "Largest delay accepted, in seconds (up to 600); sets the buffer "
+                        + "capacity, ~188 KiB per second at 48 kHz stereo (5 min ≈ 58 MB), "
+                        + "committed only as audio fills it.",
                     defaultValue: "60", placeholder: "<sec>"
                 ),
                 PipelineHelperOption(

@@ -45,8 +45,11 @@ import Darwin
 //   --channels       channel count (default 2)
 //   --delay          initial delay in seconds (default 0)
 //   --max-delay      largest delay the stage will accept, seconds (default
-//                    60). Sets the buffer size: 60 s of 48 kHz stereo S16LE
-//                    is ~11.5 MB, allocated up front.
+//                    60, up to 600). Sets the buffer's capacity, at ~188 KiB
+//                    per second of 48 kHz stereo S16LE (5 min ≈ 58 MB). The
+//                    memory is committed lazily as audio fills the buffer, not
+//                    up front, so a stage with a large maximum costs nothing
+//                    until the stream has actually run that long.
 //   --fade-ms        ramp length used whenever the delay changes (default 30)
 //   --control-port   UDP port (loopback) for live updates (see below)
 //   --exit-with-parent  exit if the parent process dies (same watchdog
@@ -254,8 +257,14 @@ if let controlPort = options.controlPort {
 // lets the write head overwrite the frame the read head is about to return.
 
 let capacity = maxDelayFrames + 2
-let ring = UnsafeMutablePointer<Int16>.allocate(capacity: capacity * channels)
-ring.initialize(repeating: 0, count: capacity * channels)
+// calloc, not allocate + initialize: a large calloc comes back as untouched
+// zero-fill-on-demand pages, so resident memory grows with the audio actually
+// written (up to the full capacity) rather than being committed at launch —
+// and reading a never-written slot (the initial-delay silence) still yields 0.
+guard let rawRing = calloc(capacity * channels, MemoryLayout<Int16>.size) else {
+    fail("could not allocate \(capacity * bytesPerFrame / 1024) KB delay buffer")
+}
+let ring = rawRing.bindMemory(to: Int16.self, capacity: capacity * channels)
 
 // Start `initialDelayFrames` frames "ahead" of the read head: the buffer is
 // already zero, so those frames play as leading silence.
@@ -274,7 +283,7 @@ func targetDelayFrames() -> Int {
 }
 
 note("started — \(Int(sampleRate)) Hz \(channels) ch, delay \(clampedDelaySeconds(options.delay)) s "
-     + "(max \(options.maxDelay) s, \(capacity * bytesPerFrame / 1024) KB buffer, fade \(options.fadeMs) ms), "
+     + "(max \(options.maxDelay) s, up to \(capacity * bytesPerFrame / 1024) KB buffer, fade \(options.fadeMs) ms), "
      + "stdin → stdout"
      + (options.controlPort.map { ", control port \($0)" } ?? ""))
 
