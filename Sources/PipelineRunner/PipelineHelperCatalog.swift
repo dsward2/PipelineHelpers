@@ -594,6 +594,41 @@ public enum PipelineHelperCatalog {
         ),
 
         PipelineHelperSpec(
+            name: "PCMDelay",
+            category: .processing,
+            summary: "Adjustable time delay (circular buffer), e.g. to line a radio "
+                + "broadcast up with a lagging TV picture. Delay is counted in samples, "
+                + "so the upstream must be real-time paced (put PCMJitterBuffer ahead of "
+                + "a bursty source). Live-adjustable, click-free, over its own UDP control port.",
+            options: [
+                rate(8_000...192_000, default: "48000"),
+                channels(1...8, default: "2"),
+                PipelineHelperOption(
+                    flag: "--delay", kind: .double(0.0...600.0),
+                    summary: "Initial delay in seconds (realised as leading silence).",
+                    defaultValue: "0", placeholder: "<sec>"
+                ),
+                PipelineHelperOption(
+                    flag: "--max-delay", kind: .double(0.0...600.0),
+                    summary: "Largest delay accepted, in seconds; sets the buffer size "
+                        + "(60 s of 48 kHz stereo is ~11.5 MB).",
+                    defaultValue: "60", placeholder: "<sec>"
+                ),
+                PipelineHelperOption(
+                    flag: "--fade-ms", kind: .double(1.0...1_000.0),
+                    summary: "Fade length used whenever the delay changes, in milliseconds.",
+                    defaultValue: "30", placeholder: "<ms>"
+                ),
+                PipelineHelperOption(
+                    flag: "--control-port", kind: .int(1...65_535),
+                    summary: "UDP loopback port for live 'delay <seconds>' updates.",
+                    placeholder: "<n>"
+                ),
+                exitWithParent
+            ]
+        ),
+
+        PipelineHelperSpec(
             name: "PCMBinauralPanner",
             category: .processing,
             summary: "Direction stage: ITD/ILD azimuth/elevation panning (not measured "
