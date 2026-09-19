@@ -634,6 +634,18 @@ public enum PipelineHelperCatalog {
                     placeholder: "en-US"
                 ),
                 PipelineHelperOption(
+                    flag: "--announce-file", kind: .path,
+                    summary: "Raw S16LE mono clip (at --rate) played at the very start of the "
+                        + "initial silence, e.g. a spoken 'now playing'; the countdown waits for it. "
+                        + "Skipped if the delay is too short to fit it plus a countdown.",
+                    placeholder: "<path>"
+                ),
+                PipelineHelperOption(
+                    flag: "--adjust-beep", kind: .flag,
+                    summary: "Play a distinct chirp when a live delay change takes effect, so the "
+                        + "listener can tell the last adjustment has landed."
+                ),
+                PipelineHelperOption(
                     flag: "--control-port", kind: .int(1...65_535),
                     summary: "UDP loopback port for live 'delay <seconds>' updates.",
                     placeholder: "<n>"

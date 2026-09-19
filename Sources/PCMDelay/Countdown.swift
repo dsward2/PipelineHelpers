@@ -1,7 +1,9 @@
 import AVFoundation
 import Foundation
 
-// Countdown cues for PCMDelay's leading silence.
+// Cues for PCMDelay: the countdown over its leading silence, an optional
+// "now playing" announcement at the very start of that silence, and a chirp
+// when a live delay change takes effect.
 //
 // While a stage that starts with `--delay N` is still playing that initial
 // silence, the listener has no way to know whether anything is wrong. With
@@ -21,6 +23,16 @@ import Foundation
 // the audio path never waits on them. A phrase that isn't rendered yet when its
 // moment arrives is played late if it becomes ready within `maxLateness`
 // seconds, and otherwise skipped.
+//
+// An announcement clip (`--announce-file`, raw S16LE mono at the stream rate) is
+// played at frame 0, and the countdown is held off until it has finished — but
+// only if there is room for both: the silence must outlast the clip plus a
+// short gap plus a few seconds of countdown, otherwise the announcement is
+// skipped so it can't crowd the delay setting.
+//
+// A distinct higher chirp marks the moment a live delay change takes effect
+// (`--adjust-beep`), so a listener nudging the delay to sync with a picture can
+// tell when the last change has landed.
 
 enum CountdownMode: String {
     case none, beeps, speech, both
@@ -220,7 +232,7 @@ private final class OfflineSpeechRenderer: NSObject, AVSpeechSynthesizerDelegate
 /// Produces the countdown overlay one frame at a time. The audio loop calls
 /// `overlay(remainingFrames:)` once per output frame; the returned mono sample
 /// is added to every channel.
-final class CountdownMixer {
+final class CueMixer {
     private struct Playing {
         var clip: [Int16]
         var position: Int
@@ -239,28 +251,51 @@ final class CountdownMixer {
     private let bank: CountdownSpeechBank?
     private let beep: [Int16]
 
+    private let adjustChirp: [Int16]
+    /// Total frames of leading silence the countdown runs over.
+    private let totalFrames: Int
+    /// Countdown cues stay silent until this many frames of the silence have
+    /// passed — set when an announcement occupies the start of it.
+    private var holdoffFrames = 0
+
     private var beepPlaying: Playing?
     private var speechPlaying: Playing?
+    private var announcePlaying: Playing?
+    private var adjustPlaying: Playing?
     private var pendingSpeech: (text: String, startFrame: Int)?
     private var frame = 0
 
-    init(rate: Int, totalSeconds: Int, mode: CountdownMode, bank: CountdownSpeechBank?) {
+    init(rate: Int, totalFrames: Int, mode: CountdownMode, bank: CountdownSpeechBank?) {
         self.rate = rate
-        self.totalSeconds = totalSeconds
+        self.totalFrames = totalFrames
+        self.totalSeconds = totalFrames / max(rate, 1)
         self.mode = mode
         self.bank = bank
-        self.beep = Self.makeBeep(rate: rate)
+        self.beep = Self.makeTone(rate: rate, hz: 1_000, milliseconds: 70, level: 0.3)
+        self.adjustChirp = Self.makeTone(rate: rate, hz: 1_600, milliseconds: 110, level: 0.35)
     }
 
-    /// 1 kHz, 70 ms, with 5 ms attack/release so it doesn't click.
-    private static func makeBeep(rate: Int) -> [Int16] {
-        let count = rate * 70 / 1_000
+    /// A sine burst with 5 ms attack/release so it doesn't click.
+    private static func makeTone(rate: Int, hz: Double, milliseconds: Int, level: Double) -> [Int16] {
+        let count = rate * milliseconds / 1_000
         let ramp = max(1, rate * 5 / 1_000)
         return (0..<count).map { i in
             let envelope = min(1.0, Double(i) / Double(ramp), Double(count - 1 - i) / Double(ramp))
-            let value = sin(2 * Double.pi * 1_000 * Double(i) / Double(rate)) * envelope * 0.3 * 32_767
+            let value = sin(2 * Double.pi * hz * Double(i) / Double(rate)) * envelope * level * 32_767
             return Int16(value.rounded())
         }
+    }
+
+    /// Starts the announcement at the current frame and keeps the countdown
+    /// quiet until `holdoffFrames` of the silence have passed.
+    func playAnnouncement(_ clip: [Int16], holdoffFrames: Int) {
+        announcePlaying = Playing(clip: clip, position: 0)
+        self.holdoffFrames = holdoffFrames
+    }
+
+    /// Marks the moment a live delay change takes effect.
+    func triggerAdjustChirp() {
+        adjustPlaying = Playing(clip: adjustChirp, position: 0)
     }
 
     /// `remainingFrames` is how many frames of leading silence are left (≤ 0
@@ -268,7 +303,8 @@ final class CountdownMixer {
     func overlay(remainingFrames: Int) -> Int32 {
         defer { frame += 1 }
 
-        if remainingFrames > 0, remainingFrames % rate == 0 {
+        if remainingFrames > 0, remainingFrames % rate == 0,
+           totalFrames - remainingFrames >= holdoffFrames {
             let seconds = remainingFrames / rate
             if mode.beeps { beepPlaying = Playing(clip: beep, position: 0) }
             if mode.speech,
@@ -289,6 +325,8 @@ final class CountdownMixer {
         var sum: Int32 = 0
         sum += advance(&beepPlaying)
         sum += advance(&speechPlaying)
+        sum += advance(&announcePlaying)
+        sum += advance(&adjustPlaying)
         return sum
     }
 
@@ -300,11 +338,12 @@ final class CountdownMixer {
         return sample
     }
 
-    /// Stops all cues (used when the delay is changed during the countdown,
-    /// which makes the "time remaining" meaningless).
+    /// Stops the countdown and announcement (used when the delay is changed
+    /// during the initial silence, which makes "time remaining" meaningless).
     func cancel() {
         beepPlaying = nil
         speechPlaying = nil
+        announcePlaying = nil
         pendingSpeech = nil
     }
 }

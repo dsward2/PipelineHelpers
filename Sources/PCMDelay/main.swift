@@ -40,8 +40,8 @@ import Darwin
 //
 // Usage: PCMDelay [--rate <Hz>] [--channels <n>] [--delay <seconds>]
 //        [--max-delay <seconds>] [--fade-ms <ms>] [--countdown <mode>]
-//        [--countdown-voice <id-or-language>] [--control-port <n>]
-//        [--exit-with-parent]
+//        [--countdown-voice <id-or-language>] [--announce-file <path>]
+//        [--adjust-beep] [--control-port <n>] [--exit-with-parent]
 //
 //   --rate           sample rate in Hz (default 48000)
 //   --channels       channel count (default 2)
@@ -60,6 +60,14 @@ import Darwin
 //                    the delay is changed during the countdown.
 //   --countdown-voice  AVSpeechSynthesisVoice identifier or BCP-47 language
 //                    for the spoken countdown (default: the system voice)
+//   --announce-file  raw S16LE *mono* clip at --rate (e.g. a "now playing"
+//                    announcement), played at the very start of the initial
+//                    silence; the countdown waits until it ends. Skipped —
+//                    logged, not an error — unless the silence is long enough
+//                    for the clip, a short gap and a few seconds of countdown,
+//                    so it never crowds the delay. Needs --delay > 0.
+//   --adjust-beep    play a distinct higher chirp when a live delay change
+//                    takes effect (the moment audio resumes at the new delay)
 //   --control-port   UDP port (loopback) for live updates (see below)
 //   --exit-with-parent  exit if the parent process dies (same watchdog
 //                    pattern as the other pipeline helpers)
@@ -89,6 +97,8 @@ struct Options {
     var fadeMs = 30.0
     var countdown = CountdownMode.none
     var countdownVoice: String?
+    var announceFile: String?
+    var adjustBeep = false
     var controlPort: UInt16?
     var exitWithParent = false
 }
@@ -139,6 +149,12 @@ func parseArguments() -> Options {
             i += 1
             guard i < args.count else { fail("Missing value for --countdown-voice") }
             o.countdownVoice = args[i]
+        case "--announce-file":
+            i += 1
+            guard i < args.count else { fail("Missing value for --announce-file") }
+            o.announceFile = args[i]
+        case "--adjust-beep":
+            o.adjustBeep = true
         case "--control-port":
             i += 1
             guard i < args.count, let port = UInt16(args[i]), port > 0 else {
@@ -298,13 +314,20 @@ var read = 0
 // audio starts); 0 means there is no countdown (or it was cancelled).
 
 var silentUntil = 0
-var countdownMixer: CountdownMixer?
+var cueMixer: CueMixer?
 var renderCountdownSpeech: (() -> Void)?
 let rateInt = Int(sampleRate.rounded())
-if options.countdown != .none, written >= rateInt {
-    let totalSeconds = written / rateInt
+
+/// Gap between the end of an announcement and the first countdown cue, and the
+/// least countdown worth having after it; a silence shorter than
+/// clip + gap + this skips the announcement instead.
+let announcementGapSeconds = 0.5
+let minCountdownAfterAnnouncement = 3.0
+
+if options.countdown != .none || options.announceFile != nil || options.adjustBeep {
     var bank: CountdownSpeechBank?
-    if options.countdown.speech {
+    let countdownActive = options.countdown != .none && written >= rateInt
+    if countdownActive, options.countdown.speech {
         var voice: AVSpeechSynthesisVoice?
         if let spec = options.countdownVoice {
             voice = AVSpeechSynthesisVoice(identifier: spec) ?? AVSpeechSynthesisVoice(language: spec)
@@ -312,15 +335,36 @@ if options.countdown != .none, written >= rateInt {
         }
         let newBank = CountdownSpeechBank()
         bank = newBank
+        let totalSeconds = written / rateInt
         // Rendered on the main thread once the audio thread is running (below).
         renderCountdownSpeech = {
             newBank.renderAll(phrases: CountdownPhrases.all(total: totalSeconds), voice: voice,
                               sampleRate: sampleRate, log: { note($0) })
         }
     }
-    countdownMixer = CountdownMixer(rate: rateInt, totalSeconds: totalSeconds,
-                                    mode: options.countdown, bank: bank)
-    silentUntil = written
+    let mixer = CueMixer(rate: rateInt, totalFrames: written,
+                         mode: countdownActive ? options.countdown : .none, bank: bank)
+    cueMixer = mixer
+    if written > 0 { silentUntil = written }
+
+    if let path = options.announceFile, written > 0 {
+        if let data = FileManager.default.contents(atPath: path), data.count >= 2 {
+            let clip = data.withUnsafeBytes { Array($0.bindMemory(to: Int16.self).prefix(data.count / 2)) }
+            let clipSeconds = String(format: "%.1f", Double(clip.count) / sampleRate)
+            let holdoff = clip.count + Int(announcementGapSeconds * Double(rateInt))
+            if written >= holdoff + Int(minCountdownAfterAnnouncement * Double(rateInt)) {
+                mixer.playAnnouncement(clip, holdoffFrames: holdoff)
+                note("announcement: playing \(clipSeconds) s clip at the start of the silence")
+            } else {
+                note("announcement: skipped — \(String(format: "%.1f", Double(written) / sampleRate)) s delay is "
+                     + "too short for a \(clipSeconds) s clip plus a countdown")
+            }
+        } else {
+            note("announcement: '\(path)' is missing or empty; nothing to play")
+        }
+    } else if options.announceFile != nil {
+        note("announcement: skipped — no initial delay to play it in")
+    }
 }
 
 // Envelope on the read side. `muted` means fully faded out and adjusting the
@@ -335,7 +379,7 @@ func targetDelayFrames() -> Int {
 }
 
 note("started — \(Int(sampleRate)) Hz \(channels) ch, delay \(clampedDelaySeconds(options.delay)) s "
-     + "(countdown \(options.countdown.rawValue), max \(options.maxDelay) s, up to \(capacity * bytesPerFrame / 1024) KB buffer, fade \(options.fadeMs) ms), "
+     + "(countdown \(options.countdown.rawValue)\(options.adjustBeep ? ", adjust beep" : ""), max \(options.maxDelay) s, up to \(capacity * bytesPerFrame / 1024) KB buffer, fade \(options.fadeMs) ms), "
      + "stdin → stdout"
      + (options.controlPort.map { ", control port \($0)" } ?? ""))
 
@@ -393,10 +437,11 @@ let audioThread = Thread {
                         // Delay now matches: start ramping back in from silence.
                         muted = false
                         gain = fadeStep
+                        if options.adjustBeep { cueMixer?.triggerAdjustChirp() }
                     } else if delayNow != target {
                         // Delay needs to change: fade out first. Any countdown to
                         // the end of the initial silence no longer means anything.
-                        if silentUntil != 0 { silentUntil = 0; countdownMixer?.cancel() }
+                        if silentUntil != 0 { silentUntil = 0; cueMixer?.cancel() }
                         gain -= fadeStep
                         if gain <= 0 {
                             gain = 0
@@ -412,7 +457,7 @@ let audioThread = Thread {
                     }
 
                     let readBase = (read % capacity) * channels
-                    let cue = countdownMixer?.overlay(remainingFrames: silentUntil - read) ?? 0
+                    let cue = cueMixer?.overlay(remainingFrames: silentUntil - read) ?? 0
                     for ch in 0..<channels {
                         let scaled = (Double(ring[readBase + ch]) * gain).rounded() + Double(cue)
                         samples[base + ch] = Int16(min(max(scaled, -32_768.0), 32_767.0))
