@@ -62,10 +62,14 @@ import Darwin
 //                    for the spoken countdown (default: the system voice)
 //   --announce-file  raw S16LE *mono* clip at --rate (e.g. a "now playing"
 //                    announcement), played at the very start of the initial
-//                    silence; the countdown waits until it ends. Skipped —
-//                    logged, not an error — unless the silence is long enough
-//                    for the clip, a short gap and a few seconds of countdown,
-//                    so it never crowds the delay. Needs --delay > 0.
+//                    silence; the countdown waits until it ends. May be given
+//                    more than once, in order of preference: the first clip
+//                    that fits is played (e.g. a longer version that also
+//                    states the delay, then a shorter one). A clip fits only
+//                    if the silence is long enough for it, a short gap and a
+//                    few seconds of countdown, so it never crowds the delay;
+//                    if none fits, nothing is played (logged, not an error).
+//                    Needs --delay > 0.
 //   --adjust-beep    play a distinct higher chirp when a live delay change
 //                    takes effect (the moment audio resumes at the new delay)
 //   --control-port   UDP port (loopback) for live updates (see below)
@@ -97,7 +101,7 @@ struct Options {
     var fadeMs = 30.0
     var countdown = CountdownMode.none
     var countdownVoice: String?
-    var announceFile: String?
+    var announceFiles: [String] = []
     var adjustBeep = false
     var controlPort: UInt16?
     var exitWithParent = false
@@ -152,7 +156,7 @@ func parseArguments() -> Options {
         case "--announce-file":
             i += 1
             guard i < args.count else { fail("Missing value for --announce-file") }
-            o.announceFile = args[i]
+            o.announceFiles.append(args[i])
         case "--adjust-beep":
             o.adjustBeep = true
         case "--control-port":
@@ -324,7 +328,7 @@ let rateInt = Int(sampleRate.rounded())
 let announcementGapSeconds = 0.5
 let minCountdownAfterAnnouncement = 3.0
 
-if options.countdown != .none || options.announceFile != nil || options.adjustBeep {
+if options.countdown != .none || !options.announceFiles.isEmpty || options.adjustBeep {
     var bank: CountdownSpeechBank?
     let countdownActive = options.countdown != .none && written >= rateInt
     if countdownActive, options.countdown.speech {
@@ -347,22 +351,26 @@ if options.countdown != .none || options.announceFile != nil || options.adjustBe
     cueMixer = mixer
     if written > 0 { silentUntil = written }
 
-    if let path = options.announceFile, written > 0 {
-        if let data = FileManager.default.contents(atPath: path), data.count >= 2 {
+    if !options.announceFiles.isEmpty, written > 0 {
+        var played = false
+        for path in options.announceFiles {
+            guard let data = FileManager.default.contents(atPath: path), data.count >= 2 else {
+                note("announcement: '\(path)' is missing or empty; trying the next")
+                continue
+            }
             let clip = data.withUnsafeBytes { Array($0.bindMemory(to: Int16.self).prefix(data.count / 2)) }
             let clipSeconds = String(format: "%.1f", Double(clip.count) / sampleRate)
             let holdoff = clip.count + Int(announcementGapSeconds * Double(rateInt))
             if written >= holdoff + Int(minCountdownAfterAnnouncement * Double(rateInt)) {
                 mixer.playAnnouncement(clip, holdoffFrames: holdoff)
-                note("announcement: playing \(clipSeconds) s clip at the start of the silence")
-            } else {
-                note("announcement: skipped — \(String(format: "%.1f", Double(written) / sampleRate)) s delay is "
-                     + "too short for a \(clipSeconds) s clip plus a countdown")
+                note("announcement: playing \(clipSeconds) s clip (\((path as NSString).lastPathComponent)) at the start of the silence")
+                played = true
+                break
             }
-        } else {
-            note("announcement: '\(path)' is missing or empty; nothing to play")
+            note("announcement: \(clipSeconds) s clip does not fit in a \(String(format: "%.1f", Double(written) / sampleRate)) s delay with a countdown")
         }
-    } else if options.announceFile != nil {
+        if !played { note("announcement: skipped — no clip fits the delay") }
+    } else if !options.announceFiles.isEmpty {
         note("announcement: skipped — no initial delay to play it in")
     }
 }

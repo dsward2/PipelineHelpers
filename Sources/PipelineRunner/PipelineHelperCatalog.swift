@@ -637,7 +637,9 @@ public enum PipelineHelperCatalog {
                     flag: "--announce-file", kind: .path,
                     summary: "Raw S16LE mono clip (at --rate) played at the very start of the "
                         + "initial silence, e.g. a spoken 'now playing'; the countdown waits for it. "
-                        + "Skipped if the delay is too short to fit it plus a countdown.",
+                        + "Repeat in order of preference: the first clip that fits the delay "
+                        + "(with a countdown) is played, and none is played if none fits.",
+                    isRepeatable: true,
                     placeholder: "<path>"
                 ),
                 PipelineHelperOption(

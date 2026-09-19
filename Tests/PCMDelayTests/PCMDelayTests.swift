@@ -395,6 +395,42 @@ final class PCMDelayTests: XCTestCase {
         XCTAssertTrue(lastStderr.contains("announcement: skipped"), lastStderr)
     }
 
+    /// Preference order: a clip too long for the delay is passed over in favour
+    /// of the next one that fits; when the first fits, it wins.
+    func test_announcement_playsTheFirstClipThatFits() throws {
+        // At 8 kHz a 6 s delay fits a clip up to 6 - 0.5 (gap) - 3 (countdown) = 2.5 s.
+        let long = try writeClip(frames: 4 * rate, value: 7_000)             // 4 s: does not fit
+        let short = try writeClip(frames: rate / 2, value: 5_000)            // 0.5 s: fits
+        let out = try runHelper(["--delay", "6", "--announce-file", long, "--announce-file", short]) {
+            $0.write(Data(count: 4 * 7 * rate))
+        }
+        let left = leftChannel(out)
+        XCTAssertTrue(left[0..<(rate / 2)].allSatisfy { $0 == 5_000 }, "the shorter clip should have played")
+        XCTAssertTrue(left[(rate / 2)...].allSatisfy { $0 == 0 })
+        XCTAssertTrue(lastStderr.contains("does not fit"), lastStderr)
+    }
+
+    func test_announcement_prefersTheFirstClipWhenItFits() throws {
+        let preferred = try writeClip(frames: rate, value: 7_000)            // 1 s: fits in 6 s
+        let fallback = try writeClip(frames: rate / 2, value: 5_000)
+        let out = try runHelper(["--delay", "6", "--announce-file", preferred, "--announce-file", fallback]) {
+            $0.write(Data(count: 4 * 7 * rate))
+        }
+        let left = leftChannel(out)
+        XCTAssertTrue(left[0..<rate].allSatisfy { $0 == 7_000 }, "the preferred clip should have played")
+        XCTAssertTrue(left[rate...].allSatisfy { $0 == 0 })
+    }
+
+    func test_announcement_skippedWhenNoClipFits() throws {
+        let long = try writeClip(frames: 4 * rate, value: 7_000)
+        let alsoLong = try writeClip(frames: 3 * rate, value: 5_000)
+        let out = try runHelper(["--delay", "6", "--announce-file", long, "--announce-file", alsoLong]) {
+            $0.write(Data(count: 4 * 7 * rate))
+        }
+        XCTAssertTrue(leftChannel(out).allSatisfy { $0 == 0 })
+        XCTAssertTrue(lastStderr.contains("no clip fits"), lastStderr)
+    }
+
     func test_countdownWaitsForTheAnnouncementToFinish() throws {
         let clip = try writeClip(frames: rate / 2, value: 5_000)             // 0.5 s → cues held off until 1.0 s
         let out = try runHelper(["--delay", "6", "--countdown", "beeps", "--announce-file", clip]) {
