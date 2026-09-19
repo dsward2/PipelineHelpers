@@ -621,6 +621,19 @@ public enum PipelineHelperCatalog {
                     defaultValue: "30", placeholder: "<ms>"
                 ),
                 PipelineHelperOption(
+                    flag: "--countdown", kind: .enumeration(["none", "beeps", "speech", "both"]),
+                    summary: "Cues mixed into the initial --delay silence, counted down to when "
+                        + "live audio starts: a beep each second and/or a spoken countdown "
+                        + "(every second for the last 10, every 5 s to 15, every 30 s above a minute).",
+                    defaultValue: "none"
+                ),
+                PipelineHelperOption(
+                    flag: "--countdown-voice", kind: .string,
+                    summary: "Voice for the spoken countdown: an AVSpeechSynthesisVoice identifier "
+                        + "or BCP-47 language code. Default: the system voice.",
+                    placeholder: "en-US"
+                ),
+                PipelineHelperOption(
                     flag: "--control-port", kind: .int(1...65_535),
                     summary: "UDP loopback port for live 'delay <seconds>' updates.",
                     placeholder: "<n>"
