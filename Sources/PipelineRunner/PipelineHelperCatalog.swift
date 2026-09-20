@@ -610,14 +610,42 @@ public enum PipelineHelperCatalog {
                 ),
                 PipelineHelperOption(
                     flag: "--max-delay", kind: .double(0.0...600.0),
-                    summary: "Largest delay accepted, in seconds; sets the buffer size "
-                        + "(60 s of 48 kHz stereo is ~11.5 MB).",
+                    summary: "Largest delay accepted, in seconds (up to 600); sets the buffer "
+                        + "capacity, ~188 KiB per second at 48 kHz stereo (5 min ≈ 58 MB), "
+                        + "committed only as audio fills it.",
                     defaultValue: "60", placeholder: "<sec>"
                 ),
                 PipelineHelperOption(
                     flag: "--fade-ms", kind: .double(1.0...1_000.0),
                     summary: "Fade length used whenever the delay changes, in milliseconds.",
                     defaultValue: "30", placeholder: "<ms>"
+                ),
+                PipelineHelperOption(
+                    flag: "--countdown", kind: .enumeration(["none", "beeps", "speech", "both"]),
+                    summary: "Cues mixed into the initial --delay silence, counted down to when "
+                        + "live audio starts: a beep each second and/or a spoken countdown "
+                        + "(every second for the last 10, every 5 s to 15, every 30 s above a minute).",
+                    defaultValue: "none"
+                ),
+                PipelineHelperOption(
+                    flag: "--countdown-voice", kind: .string,
+                    summary: "Voice for the spoken countdown: an AVSpeechSynthesisVoice identifier "
+                        + "or BCP-47 language code. Default: the system voice.",
+                    placeholder: "en-US"
+                ),
+                PipelineHelperOption(
+                    flag: "--announce-file", kind: .path,
+                    summary: "Raw S16LE mono clip (at --rate) played at the very start of the "
+                        + "initial silence, e.g. a spoken 'now playing'; the countdown waits for it. "
+                        + "Repeat in order of preference: the first clip that fits the delay "
+                        + "(with a countdown) is played, and none is played if none fits.",
+                    isRepeatable: true,
+                    placeholder: "<path>"
+                ),
+                PipelineHelperOption(
+                    flag: "--adjust-beep", kind: .flag,
+                    summary: "Play a distinct chirp when a live delay change takes effect, so the "
+                        + "listener can tell the last adjustment has landed."
                 ),
                 PipelineHelperOption(
                     flag: "--control-port", kind: .int(1...65_535),

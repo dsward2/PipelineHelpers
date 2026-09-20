@@ -51,6 +51,9 @@ final class PCMDelayTests: XCTestCase {
 
     // MARK: Running the helper
 
+    /// Everything the most recent `runHelper` wrote to stderr.
+    private var lastStderr = ""
+
     /// Runs `PCMDelay args`, lets `drive` write to its stdin (and poke its
     /// control port), and returns everything it wrote to stdout.
     private func runHelper(_ args: [String], drive: (FileHandle) throws -> Void) throws -> Data {
@@ -60,8 +63,16 @@ final class PCMDelayTests: XCTestCase {
         let stdinPipe = Pipe(), stdoutPipe = Pipe()
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
-        process.standardError = FileHandle.nullDevice
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
         try process.run()
+
+        let stderrCollector = Collector()
+        DispatchQueue(label: "stderr").async {
+            let h = stderrPipe.fileHandleForReading
+            while case let d = h.availableData, !d.isEmpty { stderrCollector.append(d) }
+        }
+        defer { lastStderr = String(decoding: stderrCollector.data, as: UTF8.self) }
 
         let collector = Collector()
         let drained = DispatchSemaphore(value: 0)
@@ -271,5 +282,206 @@ final class PCMDelayTests: XCTestCase {
         }
         XCTAssertTrue(reply?.contains("delay=2.0") == true, "unexpected reply: \(reply ?? "nil")")
         XCTAssertTrue(reply?.contains("max=2.0") == true)
+    }
+
+    // MARK: Countdown
+
+    /// Beeps are computed in sample time, so this needs no real-time pacing:
+    /// one 70 ms beep at each whole second remaining (3, 2, 1), silence
+    /// between, then the input exactly, starting at second 3.
+    func test_countdownBeeps_markEachSecondOfTheSilence() throws {
+        let input = ramp(from: 0, count: 4 * rate)      // 3 s of silence + 1 s of audio
+        let out = try runHelper(["--delay", "3", "--countdown", "beeps"]) { $0.write(input) }
+        let left = leftChannel(out)
+        XCTAssertEqual(left.count, 4 * rate)
+
+        let silence = 3 * rate
+        for second in 0..<3 {
+            let start = second * rate
+            let beepPeak = left[start..<(start + 560)].map { abs(Int($0)) }.max() ?? 0
+            XCTAssertGreaterThan(beepPeak, 9_000, "no beep at the start of silence second \(second)")
+            XCTAssertLessThan(beepPeak, 10_500, "beep louder than the intended level")
+            XCTAssertTrue(left[(start + 600)..<(start + rate)].allSatisfy { $0 == 0 },
+                          "sound between beeps in second \(second)")
+        }
+        XCTAssertEqual(Array(left[silence...]), Array(leftChannel(input)[..<(left.count - silence)]),
+                       "live audio must start exactly when the silence ends, untouched")
+    }
+
+    func test_countdownNone_addsNothingToTheSilence() throws {
+        let out = try runHelper(["--delay", "2", "--countdown", "none"]) { $0.write(ramp(from: 0, count: 3 * rate)) }
+        XCTAssertTrue(leftChannel(out)[0..<(2 * rate)].allSatisfy { $0 == 0 })
+    }
+
+    func test_countdownIsCancelledWhenTheDelayChanges() throws {
+        let port = controlPort()
+        let client = ControlClient(port: port)
+        let silence = Data(count: 4 * 8_000)            // 8000 frames of digital silence
+        let out = try runHelper(["--delay", "4", "--countdown", "beeps", "--control-port", "\(port)"]) { h in
+            XCTAssertTrue(client.waitUntilListening(), "control port never came up")
+            h.write(silence)                            // takes the first beep (t = 4)…
+            usleep(200_000)
+            client.send("delay 1\n")                    // …then the delay changes mid-countdown
+            usleep(200_000)
+            h.write(silence + silence + silence + silence)
+        }
+        let left = leftChannel(out)
+        XCTAssertGreaterThan(left[0..<560].map { abs(Int($0)) }.max() ?? 0, 9_000, "first beep missing")
+        // The input is silence, so any later beep from the old countdown
+        // would be the only thing that could make the output non-zero.
+        XCTAssertTrue(left[(rate)...].allSatisfy { $0 == 0 }, "a countdown cue survived the delay change")
+    }
+
+    /// Spoken cues are rendered by the system synthesizer in real time, so this
+    /// feeds audio at real-time pace and looks for energy in the gap between
+    /// two beeps. Skipped where the synthesizer produces nothing.
+    func test_countdownSpeech_isMixedIntoTheSilence() throws {
+        let seconds = 5
+        let out = try runHelper(["--delay", "\(seconds)", "--countdown", "both"]) { h in
+            let chunk = ramp(from: 0, count: rate / 10)
+            let start = Date()
+            for i in 0..<((seconds + 1) * 10) {
+                h.write(chunk)
+                let due = start.addingTimeInterval(Double(i + 1) * 0.1)
+                Thread.sleep(forTimeInterval: max(0, due.timeIntervalSinceNow))
+            }
+        }
+        try XCTSkipIf(lastStderr.contains("no audio rendered") || lastStderr.contains("could not create speech"),
+                      "speech synthesis unavailable here: \(lastStderr)")
+
+        let left = leftChannel(out)
+        // Speech starts 120 ms after each beep; look 200 ms past it, in the
+        // last three seconds where every second is spoken ("3", "2", "1").
+        var spokenSeconds = 0
+        for second in (seconds - 3)..<seconds {
+            let window = left[(second * rate + 1_000)..<(second * rate + rate - 1_000)]
+            if (window.map { abs(Int($0)) }.max() ?? 0) > 2_000 { spokenSeconds += 1 }
+        }
+        XCTAssertGreaterThanOrEqual(spokenSeconds, 2, "expected spoken cues in the final seconds of the silence")
+    }
+
+    // MARK: Announcement and adjust chirp
+
+    /// A mono S16LE clip file of `frames` samples, all `value`.
+    private func writeClip(frames: Int, value: Int16) throws -> String {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PCMDelayTests-clip-\(UUID().uuidString).raw")
+        let data = [Int16](repeating: value, count: frames).withUnsafeBufferPointer { Data(buffer: $0) }
+        try data.write(to: url)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url.path
+    }
+
+    func test_announcement_playsAtTheStartOfTheSilence() throws {
+        let clip = try writeClip(frames: rate / 2, value: 5_000)             // 0.5 s
+        let out = try runHelper(["--delay", "6", "--announce-file", clip]) { $0.write(Data(count: 4 * 7 * rate)) }
+        let left = leftChannel(out)
+        XCTAssertTrue(left[0..<(rate / 2)].allSatisfy { $0 == 5_000 }, "clip must play from the first frame")
+        XCTAssertTrue(left[(rate / 2)...].allSatisfy { $0 == 0 }, "nothing else may be added to the silence")
+        XCTAssertTrue(lastStderr.contains("announcement: playing"), lastStderr)
+    }
+
+    func test_announcement_isSkippedWhenTheDelayIsTooShort() throws {
+        let clip = try writeClip(frames: rate / 2, value: 5_000)
+        let out = try runHelper(["--delay", "2", "--announce-file", clip]) { $0.write(Data(count: 4 * 4 * rate)) }
+        XCTAssertTrue(leftChannel(out).allSatisfy { $0 == 0 }, "a too-short delay must not play the announcement")
+        XCTAssertTrue(lastStderr.contains("announcement: skipped"), lastStderr)
+    }
+
+    func test_announcement_isSkippedWithNoInitialDelay() throws {
+        let clip = try writeClip(frames: rate / 2, value: 5_000)
+        let out = try runHelper(["--announce-file", clip]) { $0.write(Data(count: 4 * rate)) }
+        XCTAssertTrue(leftChannel(out).allSatisfy { $0 == 0 })
+        XCTAssertTrue(lastStderr.contains("announcement: skipped"), lastStderr)
+    }
+
+    /// Preference order: a clip too long for the delay is passed over in favour
+    /// of the next one that fits; when the first fits, it wins.
+    func test_announcement_playsTheFirstClipThatFits() throws {
+        // At 8 kHz a 6 s delay fits a clip up to 6 - 0.5 (gap) - 3 (countdown) = 2.5 s.
+        let long = try writeClip(frames: 4 * rate, value: 7_000)             // 4 s: does not fit
+        let short = try writeClip(frames: rate / 2, value: 5_000)            // 0.5 s: fits
+        let out = try runHelper(["--delay", "6", "--announce-file", long, "--announce-file", short]) {
+            $0.write(Data(count: 4 * 7 * rate))
+        }
+        let left = leftChannel(out)
+        XCTAssertTrue(left[0..<(rate / 2)].allSatisfy { $0 == 5_000 }, "the shorter clip should have played")
+        XCTAssertTrue(left[(rate / 2)...].allSatisfy { $0 == 0 })
+        XCTAssertTrue(lastStderr.contains("does not fit"), lastStderr)
+    }
+
+    func test_announcement_prefersTheFirstClipWhenItFits() throws {
+        let preferred = try writeClip(frames: rate, value: 7_000)            // 1 s: fits in 6 s
+        let fallback = try writeClip(frames: rate / 2, value: 5_000)
+        let out = try runHelper(["--delay", "6", "--announce-file", preferred, "--announce-file", fallback]) {
+            $0.write(Data(count: 4 * 7 * rate))
+        }
+        let left = leftChannel(out)
+        XCTAssertTrue(left[0..<rate].allSatisfy { $0 == 7_000 }, "the preferred clip should have played")
+        XCTAssertTrue(left[rate...].allSatisfy { $0 == 0 })
+    }
+
+    func test_announcement_skippedWhenNoClipFits() throws {
+        let long = try writeClip(frames: 4 * rate, value: 7_000)
+        let alsoLong = try writeClip(frames: 3 * rate, value: 5_000)
+        let out = try runHelper(["--delay", "6", "--announce-file", long, "--announce-file", alsoLong]) {
+            $0.write(Data(count: 4 * 7 * rate))
+        }
+        XCTAssertTrue(leftChannel(out).allSatisfy { $0 == 0 })
+        XCTAssertTrue(lastStderr.contains("no clip fits"), lastStderr)
+    }
+
+    func test_countdownWaitsForTheAnnouncementToFinish() throws {
+        let clip = try writeClip(frames: rate / 2, value: 5_000)             // 0.5 s → cues held off until 1.0 s
+        let out = try runHelper(["--delay", "6", "--countdown", "beeps", "--announce-file", clip]) {
+            $0.write(Data(count: 4 * 7 * rate))
+        }
+        let left = leftChannel(out)
+        XCTAssertEqual(left[0..<(rate / 2)].map { abs(Int($0)) }.max(), 5_000,
+                       "a countdown beep landed on top of the announcement")
+        // t = 6 (frame 0) is inside the hold-off; t = 5 (frame 1 s) is the first beep.
+        XCTAssertGreaterThan(left[rate..<(rate + 560)].map { abs(Int($0)) }.max() ?? 0, 9_000,
+                             "first countdown beep missing after the announcement")
+    }
+
+    func test_adjustBeep_marksTheMomentALiveChangeTakesEffect() throws {
+        let port = controlPort()
+        let client = ControlClient(port: port)
+        let silence = Data(count: 4 * rate)                                   // 1 s of silent input
+        let out = try runHelper(["--adjust-beep", "--control-port", "\(port)"]) { h in
+            XCTAssertTrue(client.waitUntilListening(), "control port never came up")
+            h.write(silence)
+            usleep(200_000)
+            client.send("delay 0.25\n")                                       // +2000 frames of hold
+            usleep(200_000)
+            h.write(silence + silence)
+        }
+        let left = leftChannel(out)
+        XCTAssertTrue(left[0..<rate].allSatisfy { $0 == 0 }, "no chirp before any change")
+
+        let loud = left.enumerated().filter { abs(Int($0.element)) > 1_000 }.map(\.offset)
+        XCTAssertFalse(loud.isEmpty, "no chirp when the delay change took effect")
+        let first = loud.first!, last = loud.last!
+        // The hold lasts 2000 frames after the change, so the chirp starts after
+        // that and lasts about 110 ms (880 frames); it is the only sound.
+        XCTAssertGreaterThan(first, rate + 2_000)
+        XCTAssertLessThan(first, rate + 3_500)
+        XCTAssertLessThan(last - first, 1_000, "expected one short chirp, saw sound spread over \(last - first) frames")
+        XCTAssertGreaterThan(left.map { abs(Int($0)) }.max() ?? 0, 10_000)
+    }
+
+    func test_noAdjustBeep_byDefault() throws {
+        let port = controlPort()
+        let client = ControlClient(port: port)
+        let silence = Data(count: 4 * rate)
+        let out = try runHelper(["--control-port", "\(port)"]) { h in
+            XCTAssertTrue(client.waitUntilListening(), "control port never came up")
+            h.write(silence)
+            usleep(200_000)
+            client.send("delay 0.25\n")
+            usleep(200_000)
+            h.write(silence + silence)
+        }
+        XCTAssertTrue(leftChannel(out).allSatisfy { $0 == 0 }, "a chirp was played without --adjust-beep")
     }
 }
