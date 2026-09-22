@@ -13,7 +13,7 @@ import Darwin
 //     running LiveAudioServer's --udp-input-port.
 //
 // Usage: PCMUDPSender --port <n> [--host <addr>] [--frame-bytes <n>]
-//        [--rate <hz>] [--exit-with-parent]
+//        [--rate <hz>] [--exit-with-parent] [--control-port <n>] [--relay <on|off>]
 //   --host defaults to 127.0.0.1 (LiveAudioServer runs on the same machine).
 //   --frame-bytes  datagram-boundary alignment in bytes (default 4 = one S16LE
 //     stereo frame). A datagram never splits a frame: the trailing 1…N−1 bytes
@@ -38,6 +38,15 @@ import Darwin
 //     on a crash/SIGKILL, where the app can't run its own cleanup). Because this
 //     is the downstream-most reader in the rtl_fm | sox | PCMUDPSender chain,
 //     exiting here collapses the whole pipeline via SIGPIPE upstream.
+//   --control-port  UDP port for live "relay on"/"relay off"/"relay?" commands
+//     (same control-socket convention as PCMDistanceGain/PCMMixer). Lets a host
+//     app mute/unmute the outgoing stream without restarting this process or
+//     anything upstream of it — e.g. ControlBooth's AirPlay receiver keeps
+//     shairport-sync connected to its AirPlay source while toggling whether the
+//     decoded audio actually reaches AntennaHead.
+//   --relay  initial relay state, "on" (default) or "off". With --control-port,
+//     this is just the starting value; "relay on"/"relay off" datagrams change
+//     it at runtime.
 //
 // Datagrams are capped at 2048 bytes, matching LocalRadio's UDPSender; this is
 // well under the loopback MTU and within LiveAudioServer's receive buffer.
@@ -54,12 +63,15 @@ func fail(_ message: String) -> Never {
 
 // MARK: Argument parsing
 
-func parseArguments() -> (host: String, port: UInt16, frameBytes: Int, rate: Int, exitWithParent: Bool) {
+func parseArguments() -> (host: String, port: UInt16, frameBytes: Int, rate: Int, exitWithParent: Bool,
+                          controlPort: UInt16?, relayEnabled: Bool) {
     var host = "127.0.0.1"
     var port: UInt16?
     var frameBytes = 4
     var rate = 48_000
     var exitWithParent = false
+    var controlPort: UInt16?
+    var relayEnabled = true
     let args = Array(CommandLine.arguments.dropFirst())
     var i = 0
     while i < args.count {
@@ -88,16 +100,28 @@ func parseArguments() -> (host: String, port: UInt16, frameBytes: Int, rate: Int
             rate = value
         case "--exit-with-parent":
             exitWithParent = true
+        case "--control-port":
+            i += 1
+            guard i < args.count, let value = UInt16(args[i]) else {
+                fail("Missing or invalid value for --control-port (expected 1–65535)")
+            }
+            controlPort = value
+        case "--relay":
+            i += 1
+            guard i < args.count, ["on", "off"].contains(args[i]) else {
+                fail("Missing or invalid value for --relay (expected 'on' or 'off')")
+            }
+            relayEnabled = (args[i] == "on")
         default:
             fail("Unknown argument '\(args[i])'")
         }
         i += 1
     }
     guard let port else { fail("--port is required") }
-    return (host, port, frameBytes, rate, exitWithParent)
+    return (host, port, frameBytes, rate, exitWithParent, controlPort, relayEnabled)
 }
 
-let (host, port, frameBytes, rate, exitWithParent) = parseArguments()
+let (host, port, frameBytes, rate, exitWithParent, controlPort, initialRelayEnabled) = parseArguments()
 
 // MARK: Parent-death watchdog
 //
@@ -144,7 +168,84 @@ guard connectResult == 0 else {
     fail("connect() to \(host):\(port) failed: \(String(cString: strerror(errno)))")
 }
 
-note("started — forwarding S16LE PCM to \(host):\(port) (\(frameBytes)-byte frame alignment, paced at \(rate) Hz)")
+// MARK: Relay mute/unmute (--control-port)
+
+/// Read from the pacing loop on every packet and written from the control
+/// thread; an NSLock around a plain Bool is cheap enough at this rate (same
+/// reasoning as PCMDistanceGain's DistanceBox).
+final class RelayBox {
+    private let lock = NSLock()
+    private var value: Bool
+    init(_ initial: Bool) { value = initial }
+    func set(_ newValue: Bool) { lock.lock(); value = newValue; lock.unlock() }
+    func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+let relayEnabled = RelayBox(initialRelayEnabled)
+
+/// UDP control listener accepting "relay on" / "relay off" / "relay?" —
+/// same accept-loop shape as PCMDistanceGain's startControlListener.
+func startControlListener(port: UInt16) {
+    let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+    guard fd >= 0 else { fail("socket() for control failed: \(String(cString: strerror(errno)))") }
+    var reuse: Int32 = 1
+    _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = port.bigEndian
+    addr.sin_addr.s_addr = INADDR_ANY
+    let result = withUnsafePointer(to: &addr) { rawAddr in
+        rawAddr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockAddr in
+            bind(fd, sockAddr, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    guard result == 0 else { fail("bind() control to port \(port) failed: \(String(cString: strerror(errno)))") }
+
+    Thread.detachNewThread {
+        let bufferSize = 512
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 1)
+        var sender = sockaddr_in()
+        while true {
+            var senderLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let received = withUnsafeMutablePointer(to: &sender) { rawSender in
+                rawSender.withMemoryRebound(to: sockaddr.self, capacity: 1) { senderAddr in
+                    recvfrom(fd, buffer, bufferSize, 0, senderAddr, &senderLen)
+                }
+            }
+            guard received > 0 else { continue }
+            let text = String(decoding: UnsafeRawBufferPointer(start: buffer, count: received), as: UTF8.self)
+            for line in text.split(whereSeparator: \.isNewline) {
+                let words = line.split(separator: " ")
+                switch words.first {
+                case "relay" where words.count == 2 && words[1] == "on":
+                    relayEnabled.set(true)
+                    note("control: relay on")
+                case "relay" where words.count == 2 && words[1] == "off":
+                    relayEnabled.set(false)
+                    note("control: relay off")
+                case "relay?":
+                    let reply = "relay=\(relayEnabled.get() ? "on" : "off")\n"
+                    _ = reply.withCString { cString in
+                        withUnsafePointer(to: &sender) { rawSender in
+                            rawSender.withMemoryRebound(to: sockaddr.self, capacity: 1) { senderAddr in
+                                sendto(fd, cString, strlen(cString), 0, senderAddr, senderLen)
+                            }
+                        }
+                    }
+                default:
+                    note("control: ignoring '\(line)'")
+                }
+            }
+        }
+    }
+}
+
+if let controlPort {
+    startControlListener(port: controlPort)
+}
+
+note("started — forwarding S16LE PCM to \(host):\(port) (\(frameBytes)-byte frame alignment, paced at \(rate) Hz"
+     + (controlPort.map { ", control port \($0), relay \(initialRelayEnabled ? "on" : "off")" } ?? "") + ")")
 
 // MARK: stdin → UDP loop
 
@@ -193,7 +294,10 @@ func sendAll(_ bytes: [UInt8]) -> Bool {
         var offset = 0
         while offset < bytes.count {
             let length = min(maxDatagram, bytes.count - offset)
-            if send(socketFD, base + offset, length, 0) < 0 {
+            // Muted: still walk through every packet's pacing/bookkeeping below
+            // (so stdin keeps draining at the real-time rate and sox/shairport-sync
+            // upstream never blocks), just skip the actual network send.
+            if relayEnabled.get(), send(socketFD, base + offset, length, 0) < 0 {
                 note("send() failed after \(totalBytes) bytes: \(String(cString: strerror(errno)))")
                 return true
             }
