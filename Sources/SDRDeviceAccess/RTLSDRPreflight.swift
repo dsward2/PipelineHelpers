@@ -22,12 +22,11 @@ public struct RTLSDRPreflightReport: Sendable, Equatable {
     public let serial: String
     /// Known SDR programs running at check time (busy only).
     public let holders: [SDRDeviceHolder]
-    /// True when Gqrx has this very device open and can be asked to release
-    /// it (`U INPUT 0`) — what drives a "Release from Gqrx" button.
-    public let gqrxCanRelease: Bool
-    /// True when Gqrx is (or may be) the holder but predates `U INPUT`, so
-    /// the only way to free the device is to quit it.
-    public let gqrxHoldsWithoutRelease: Bool
+    /// True when Gqrx is the holder: its configured input device is this
+    /// dongle, or (with its remote control off) it is the only SDR program
+    /// running. Quitting Gqrx frees the dongle — what drives a "Quit Gqrx and
+    /// Retry" button. (Stopping Gqrx's DSP doesn't: the device stays open.)
+    public let gqrxIsHolder: Bool
 
     public var isAvailable: Bool { outcome == .available }
 
@@ -49,11 +48,8 @@ public struct RTLSDRPreflightReport: Sendable, Equatable {
             return "No connected RTL-SDR matches USB device \u{201C}\(requested)\u{201D}."
         case .busy:
             var text = "\(deviceLabel) is in use by another program"
-            if gqrxCanRelease || gqrxHoldsWithoutRelease {
+            if gqrxIsHolder {
                 text += " (Gqrx)."
-                if gqrxHoldsWithoutRelease {
-                    text += " Gqrx can't be asked to release it (remote control is off, or this Gqrx predates U INPUT), so quit Gqrx to free it."
-                }
             } else if holders.isEmpty {
                 text += "."
             } else {
@@ -66,22 +62,20 @@ public struct RTLSDRPreflightReport: Sendable, Equatable {
     }
 
     public init(requested: String, outcome: Outcome, index: UInt32?, serial: String,
-                holders: [SDRDeviceHolder] = [], gqrxCanRelease: Bool = false,
-                gqrxHoldsWithoutRelease: Bool = false) {
+                holders: [SDRDeviceHolder] = [], gqrxIsHolder: Bool = false) {
         self.requested = requested
         self.outcome = outcome
         self.index = index
         self.serial = serial
         self.holders = holders
-        self.gqrxCanRelease = gqrxCanRelease
-        self.gqrxHoldsWithoutRelease = gqrxHoldsWithoutRelease
+        self.gqrxIsHolder = gqrxIsHolder
     }
 }
 
 /// Checks that an RTL-SDR is free before a tool is launched on it, so a
 /// contention failure is reported up front (naming the likely holder) instead
-/// of surfacing as a pipeline that silently dies, and offers to take the
-/// device back from Gqrx.
+/// of surfacing as a pipeline that silently dies, and says when quitting Gqrx
+/// would free it.
 ///
 /// All calls block — the trial open takes ~0.4 s on a free device — so run
 /// them off the main thread, *after* any previous pipeline on the device has
@@ -93,13 +87,14 @@ public struct RTLSDRPreflightReport: Sendable, Equatable {
 /// failed open.
 public enum RTLSDRPreflight {
 
-    /// Checks `device` (an `rtl_fm -d` value). `gqrxStatus` defaults to
-    /// asking a local Gqrx; tests pass a fixed value.
+    /// Checks `device` (an `rtl_fm -d` value). `gqrxInputDevice` defaults to
+    /// asking a local Gqrx's remote control (nil = not reachable); tests pass
+    /// a fixed value.
     public static func check(device: String,
                              backend: RTLSDRBackend,
                              excludingPIDs: Set<pid_t> = [],
                              holders: () -> [SDRDeviceHolder]? = { nil },
-                             gqrxStatus: () -> GqrxInputControl.Status? = { GqrxInputControl.status() })
+                             gqrxInputDevice: () -> String? = { GqrxRemoteControl.inputDevice() })
         -> RTLSDRPreflightReport
     {
         let requested = device.trimmingCharacters(in: .whitespaces)
@@ -121,46 +116,46 @@ public enum RTLSDRPreflight {
         // Busy: find out who has it. Gqrx can say exactly which device it
         // holds; everything else is a list of likely candidates.
         var running = holders() ?? SDRDeviceHolders.running(excludingPIDs: excludingPIDs)
-        var gqrxCanRelease = false
-        var gqrxHoldsWithoutRelease = false
-        if let gqrx = gqrxStatus() {
-            // Offer release only when Gqrx's device is this one — or can't be
-            // resolved (an older Gqrx without \get_input_device) — so a Gqrx
-            // using a different dongle is never disturbed.
-            let gqrxIndex = RTLSDRDeviceResolver.osmosdrIndex(for: gqrx.inputDevice, serials: serials)
-            let isLocalRTL = gqrx.inputDevice.isEmpty || gqrxIndex != nil
-            let holdsThis = gqrx.inputOpen && isLocalRTL && (gqrxIndex == nil || gqrxIndex == index)
-            if holdsThis {
-                if gqrx.hasInputControl { gqrxCanRelease = true } else { gqrxHoldsWithoutRelease = true }
+        var gqrxIsHolder = false
+        if running.contains(where: { $0.name == "Gqrx" }) {
+            if let gqrxDevice = gqrxInputDevice() {
+                // Gqrx holds its configured device from launch (DSP running or
+                // not). It's the holder when that device is this one — or can't
+                // be resolved (a Gqrx without \get_input_device) — so a Gqrx on
+                // a different dongle is never quit for nothing.
+                let gqrxIndex = RTLSDRDeviceResolver.osmosdrIndex(for: gqrxDevice, serials: serials)
+                let isLocalRTL = gqrxDevice.isEmpty || gqrxIndex != nil
+                gqrxIsHolder = isLocalRTL && (gqrxIndex == nil || gqrxIndex == index)
+                if !gqrxIsHolder { running.removeAll { $0.name == "Gqrx" } }   // provably not it
             } else {
-                running.removeAll { $0.name == "Gqrx" }   // it provably isn't the holder
+                // Remote control off, so Gqrx can't say which dongle it has:
+                // blame it only when it's the only SDR program running.
+                gqrxIsHolder = running.map(\.name) == ["Gqrx"]
             }
-        } else if running.map(\.name) == ["Gqrx"] {
-            // Gqrx is the only SDR program running, with remote control off:
-            // almost certainly the holder, and it can't be asked to release.
-            gqrxHoldsWithoutRelease = true
         }
 
         return RTLSDRPreflightReport(requested: requested, outcome: .busy(code: code), index: index,
-                                     serial: serial, holders: running,
-                                     gqrxCanRelease: gqrxCanRelease,
-                                     gqrxHoldsWithoutRelease: gqrxHoldsWithoutRelease)
+                                     serial: serial, holders: running, gqrxIsHolder: gqrxIsHolder)
     }
 
-    /// Asks Gqrx to release its input device (`U INPUT 0`), then re-checks
-    /// `device`, allowing the USB release up to `settleSeconds` to land.
-    /// Returns the fresh report (still `.busy` if something else holds it).
-    public static func releaseFromGqrxAndRecheck(device: String,
-                                                 backend: RTLSDRBackend,
-                                                 excludingPIDs: Set<pid_t> = [],
-                                                 settleSeconds: Double = 2.0) -> RTLSDRPreflightReport {
-        GqrxInputControl.setInputOpen(false)
+    /// Quits Gqrx (a normal quit — see `GqrxApp`), then re-checks `device`,
+    /// allowing the USB release up to `settleSeconds` to land. Returns the
+    /// quit result (its bundle URLs let a caller relaunch Gqrx later) and the
+    /// fresh report (still `.busy` if something else holds the dongle).
+    /// Blocks for as long as Gqrx takes to quit.
+    public static func quitGqrxAndRecheck(device: String,
+                                          backend: RTLSDRBackend,
+                                          excludingPIDs: Set<pid_t> = [],
+                                          settleSeconds: Double = 3.0)
+        -> (quit: GqrxApp.QuitResult, report: RTLSDRPreflightReport)
+    {
+        let quit = GqrxApp.quit()
         let deadline = Date().addingTimeInterval(settleSeconds)
         var report = check(device: device, backend: backend, excludingPIDs: excludingPIDs)
         while case .busy = report.outcome, Date() < deadline {
             Thread.sleep(forTimeInterval: 0.2)
             report = check(device: device, backend: backend, excludingPIDs: excludingPIDs)
         }
-        return report
+        return (quit, report)
     }
 }

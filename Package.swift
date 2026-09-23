@@ -55,7 +55,7 @@ import PackageDescription
 //                       assembly/teardown used by both apps (previously
 //                       duplicated verbatim in ControlBooth)
 //   • SDRDeviceAccess   RTL-SDR preflight (can the dongle be opened? who has
-//                       it?) and the Gqrx `U INPUT` release/reopen client;
+//                       it?) and quitting / relaunching Gqrx to free one;
 //                       each app injects its own librtlsdr (RTLSDRBackend)
 //   • AudioEncoders     MP3/AAC PCM encoders (ported from LiveAudioServer's
 //                       MP3Encoder/AACEncoder, minus its HTTP-streaming
@@ -96,7 +96,7 @@ let package = Package(
         .target(name: "PipelineRunner"),
         .testTarget(name: "PipelineRunnerTests", dependencies: ["PipelineRunner"]),
         // RTL-SDR preflight (is the dongle free? who holds it?) and the Gqrx
-        // `U INPUT` release client, shared by AntennaHead and ControlBooth.
+        // Gqrx quit / relaunch, shared by AntennaHead and ControlBooth.
         // librtlsdr itself is injected by each app (see RTLSDRBackend).
         .target(name: "SDRDeviceAccess"),
         .testTarget(name: "SDRDeviceAccessTests", dependencies: ["SDRDeviceAccess"]),

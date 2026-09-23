@@ -63,16 +63,15 @@ final class RTLSDRDeviceResolverTests: XCTestCase {
 
 final class RTLSDRPreflightTests: XCTestCase {
     let serials: [String?] = ["00000090", "00000360", "00000180"]
-    let gqrxHolding: (String) -> GqrxInputControl.Status = {
-        GqrxInputControl.Status(hasInputControl: true, inputOpen: true, inputDevice: $0)
-    }
+    let gqrx = SDRDeviceHolder(pid: 10, name: "Gqrx", app: "Gqrx-for-AntennaHead")
 
+    /// `gqrxDevice`: Gqrx's `\get_input_device` reply; nil = remote control off.
     private func check(_ device: String, busy: Set<UInt32> = [], serials: [String?]? = nil,
                        holders: [SDRDeviceHolder] = [],
-                       gqrx: GqrxInputControl.Status? = nil) -> RTLSDRPreflightReport {
+                       gqrxDevice: String? = nil) -> RTLSDRPreflightReport {
         RTLSDRPreflight.check(device: device,
                               backend: FakeBackend(serials: serials ?? self.serials, busy: busy),
-                              holders: { holders }, gqrxStatus: { gqrx })
+                              holders: { holders }, gqrxInputDevice: { gqrxDevice })
     }
 
     func testAvailable() {
@@ -90,51 +89,50 @@ final class RTLSDRPreflightTests: XCTestCase {
         XCTAssertEqual(r.message, "No connected RTL-SDR matches USB device \u{201C}00000270\u{201D}.")
     }
 
-    func testBusyHeldByGqrxOnThisDeviceOffersRelease() {
-        let r = check("00000360", busy: [1],
-                      holders: [SDRDeviceHolder(pid: 10, name: "Gqrx", app: "Gqrx-for-AntennaHead")],
-                      gqrx: gqrxHolding("rtl=1"))
+    func testGqrxHoldingThisDeviceIsTheHolder() {
+        let r = check("00000360", busy: [1], holders: [gqrx], gqrxDevice: "rtl=1")
         XCTAssertEqual(r.outcome, .busy(code: -3))
-        XCTAssertTrue(r.gqrxCanRelease)
+        XCTAssertTrue(r.gqrxIsHolder)
         XCTAssertEqual(r.message, "USB device 00000360 is in use by another program (Gqrx).")
     }
 
-    func testGqrxOnADifferentDeviceIsNotBlamedOrOffered() {
+    func testGqrxOnADifferentDeviceIsNotBlamed() {
         let r = check("00000360", busy: [1],
-                      holders: [SDRDeviceHolder(pid: 10, name: "Gqrx", app: nil),
-                                SDRDeviceHolder(pid: 11, name: "rtl_fm_localradio", app: "ControlBooth")],
-                      gqrx: gqrxHolding("rtl=00000090"))
-        XCTAssertFalse(r.gqrxCanRelease)
-        XCTAssertFalse(r.gqrxHoldsWithoutRelease)
+                      holders: [gqrx, SDRDeviceHolder(pid: 11, name: "rtl_fm_localradio", app: "ControlBooth")],
+                      gqrxDevice: "rtl=00000090")
+        XCTAssertFalse(r.gqrxIsHolder)
         XCTAssertEqual(r.message,
                        "USB device 00000360 is in use by another program. Running now: rtl_fm_localradio (ControlBooth).")
+    }
+
+    func testGqrxWithoutDeviceQueryIsAssumedTheHolder() {
+        // Reachable, but no \get_input_device (stock Gqrx): can't rule it out.
+        XCTAssertTrue(check("0", busy: [0], holders: [gqrx], gqrxDevice: "").gqrxIsHolder)
+    }
+
+    func testGqrxOnANetworkSourceIsNotTheHolder() {
+        XCTAssertFalse(check("0", busy: [0], holders: [gqrx], gqrxDevice: "rtl_tcp=127.0.0.1:1234").gqrxIsHolder)
+    }
+
+    func testGqrxWithRemoteControlOffIsBlamedOnlyWhenAlone() {
+        XCTAssertTrue(check("0", busy: [0], holders: [gqrx], gqrxDevice: nil).gqrxIsHolder)
+        let r = check("0", busy: [0], holders: [gqrx, SDRDeviceHolder(pid: 12, name: "rtl_tcp", app: nil)],
+                      gqrxDevice: nil)
+        XCTAssertFalse(r.gqrxIsHolder)
+        XCTAssertEqual(r.message, "USB device 00000090 is in use by another program. Running now: Gqrx, rtl_tcp.")
+    }
+
+    func testGqrxNotRunningIsNeverAsked() {
+        var asked = false
+        _ = RTLSDRPreflight.check(device: "0", backend: FakeBackend(serials: serials, busy: [0]),
+                                  holders: { [] }, gqrxInputDevice: { asked = true; return "rtl=0" })
+        XCTAssertFalse(asked)
     }
 
     func testDuplicateHolderNamesCollapse() {
         let r = check("2", busy: [2], holders: [SDRDeviceHolder(pid: 1, name: "rtl_sdr", app: nil),
                                                 SDRDeviceHolder(pid: 2, name: "rtl_sdr", app: nil)])
         XCTAssertEqual(r.message, "USB device 00000180 is in use by another program. Running now: rtl_sdr.")
-    }
-
-    func testReleasedGqrxIsNotTheHolder() {
-        let released = GqrxInputControl.Status(hasInputControl: true, inputOpen: false, inputDevice: "rtl=1")
-        let r = check("1", busy: [1], gqrx: released)
-        XCTAssertFalse(r.gqrxCanRelease)
-        XCTAssertEqual(r.message, "USB device 00000360 is in use by another program.")
-    }
-
-    func testOlderGqrxWithoutInputControlMustBeQuit() {
-        let old = GqrxInputControl.Status(hasInputControl: false, inputOpen: true, inputDevice: "")
-        let r = check("0", busy: [0], gqrx: old)
-        XCTAssertFalse(r.gqrxCanRelease)
-        XCTAssertTrue(r.gqrxHoldsWithoutRelease)
-        XCTAssertTrue(r.message.hasPrefix("USB device 00000090 is in use by another program (Gqrx). Gqrx can't be asked"))
-    }
-
-    func testGqrxWithRemoteControlOffIsTheLikelyHolder() {
-        let r = check("0", busy: [0], holders: [SDRDeviceHolder(pid: 10, name: "Gqrx", app: nil)], gqrx: nil)
-        XCTAssertTrue(r.gqrxHoldsWithoutRelease)
-        XCTAssertFalse(r.gqrxCanRelease)
     }
 
     func testDeviceLabelFallsBackToIndexWithoutSerial() {
@@ -175,7 +173,7 @@ final class SDRDeviceHoldersTests: XCTestCase {
 }
 
 /// Talks to a fake Gqrx remote-control server on an ephemeral local port.
-final class GqrxInputControlTests: XCTestCase {
+final class GqrxRemoteControlTests: XCTestCase {
 
     /// Serves `replies[command]` (one line) per received command line.
     private final class FakeGqrx {
@@ -238,37 +236,22 @@ final class GqrxInputControlTests: XCTestCase {
         func stop() { close(listener) }
     }
 
-    func testStatusOfGqrxWithInputControl() {
-        let gqrx = FakeGqrx(replies: ["u ?": "RECORD IQRECORD DSP RDS MUTE UDP INPUT",
-                                     "u INPUT": "0",
-                                     "\\get_input_device": "rtl=00000360"])
+    func testInputDevice() {
+        let gqrx = FakeGqrx(replies: ["\\get_input_device": "rtl=00000360"])
         defer { gqrx.stop() }
-        let status = GqrxInputControl.status(port: gqrx.port)
-        XCTAssertEqual(status, GqrxInputControl.Status(hasInputControl: true, inputOpen: false,
-                                                       inputDevice: "rtl=00000360"))
+        XCTAssertEqual(GqrxRemoteControl.inputDevice(port: gqrx.port), "rtl=00000360")
     }
 
-    func testStatusOfOlderGqrx() {
-        let gqrx = FakeGqrx(replies: ["u ?": "RECORD IQRECORD DSP RDS MUTE"])
+    func testGqrxWithoutDeviceQuery() {
+        let gqrx = FakeGqrx(replies: [:])   // older Gqrx: RPRT 1
         defer { gqrx.stop() }
-        let status = GqrxInputControl.status(port: gqrx.port)
-        XCTAssertEqual(status, GqrxInputControl.Status(hasInputControl: false, inputOpen: true, inputDevice: ""))
-        XCTAssertFalse(gqrx.commands.contains("u INPUT"), "shouldn't ask an older Gqrx for INPUT")
-    }
-
-    func testSetInputOpenSendsCommandAndReadsReply() {
-        let gqrx = FakeGqrx(replies: ["U INPUT 0": "RPRT 0", "U INPUT 1": "RPRT 1"])
-        defer { gqrx.stop() }
-        XCTAssertTrue(GqrxInputControl.setInputOpen(false, port: gqrx.port))
-        XCTAssertFalse(GqrxInputControl.setInputOpen(true, port: gqrx.port))
-        XCTAssertEqual(gqrx.commands, ["U INPUT 0", "U INPUT 1"])
+        XCTAssertEqual(GqrxRemoteControl.inputDevice(port: gqrx.port), "")
     }
 
     func testNoGqrxListening() {
         let gqrx = FakeGqrx(replies: [:])
         let port = gqrx.port
         gqrx.stop()
-        XCTAssertNil(GqrxInputControl.status(port: port))
-        XCTAssertFalse(GqrxInputControl.setInputOpen(false, port: port))
+        XCTAssertNil(GqrxRemoteControl.inputDevice(port: port))
     }
 }
