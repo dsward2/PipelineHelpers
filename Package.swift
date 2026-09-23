@@ -54,6 +54,9 @@ import PackageDescription
 //   • PipelineRunner    TaskPipelineManager + TaskItem — Process-chain
 //                       assembly/teardown used by both apps (previously
 //                       duplicated verbatim in ControlBooth)
+//   • SDRDeviceAccess   RTL-SDR preflight (can the dongle be opened? who has
+//                       it?) and quitting / relaunching Gqrx to free one;
+//                       each app injects its own librtlsdr (RTLSDRBackend)
 //   • AudioEncoders     MP3/AAC PCM encoders (ported from LiveAudioServer's
 //                       MP3Encoder/AACEncoder, minus its HTTP-streaming
 //                       machinery) shared by LiveAudioRecorder; LiveAudioServer
@@ -70,6 +73,7 @@ let package = Package(
     ],
     products: [
         .library(name: "PipelineRunner", targets: ["PipelineRunner"]),
+        .library(name: "SDRDeviceAccess", targets: ["SDRDeviceAccess"]),
         .library(name: "AudioEncoders", targets: ["AudioEncoders"]),
         .executable(name: "PCMUDPSender", targets: ["PCMUDPSender"]),
         .executable(name: "PCMUDPReceiver", targets: ["PCMUDPReceiver"]),
@@ -91,6 +95,11 @@ let package = Package(
     targets: [
         .target(name: "PipelineRunner"),
         .testTarget(name: "PipelineRunnerTests", dependencies: ["PipelineRunner"]),
+        // RTL-SDR preflight (is the dongle free? who holds it?) and the Gqrx
+        // Gqrx quit / relaunch, shared by AntennaHead and ControlBooth.
+        // librtlsdr itself is injected by each app (see RTLSDRBackend).
+        .target(name: "SDRDeviceAccess"),
+        .testTarget(name: "SDRDeviceAccessTests", dependencies: ["SDRDeviceAccess"]),
         .testTarget(name: "AudioEncodersTests", dependencies: ["AudioEncoders"]),
         // Vendored libmp3lame as a universal (arm64 + x86_64) static
         // XCFramework, mirrored from LiveAudioServer/Frameworks. Regenerate
