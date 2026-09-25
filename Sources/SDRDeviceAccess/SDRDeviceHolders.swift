@@ -47,6 +47,7 @@ public enum SDRDeviceHolders {
         ("rtl_eeprom", "rtl_eeprom"),
         ("nrsc5", "nrsc5"),
         ("dump1090", "dump1090"),
+        ("dsd-neo", "dsd-neo"),
         ("sdrpp", "SDR++"),
         ("sdr++", "SDR++"),
         ("cubicsdr", "CubicSDR"),
