@@ -166,6 +166,10 @@ let package = Package(
         .testTarget(name: "PCMUDPSenderFramingTests"),
         // Spawns the built PCMDelay and checks the delayed output sample-exact,
         // plus live delay changes over its UDP control port.
-        .testTarget(name: "PCMDelayTests")
+        .testTarget(name: "PCMDelayTests"),
+        // Spawns the built PCMUDPReceiver with --fill-silence and checks it
+        // paces silence in real time and passes bursts through byte-exact,
+        // even when datagrams split sample-frames.
+        .testTarget(name: "PCMUDPReceiverFillSilenceTests")
     ]
 )
