@@ -79,7 +79,7 @@ import Darwin
 //   --control-port             UDP port for live updates (see below)
 //   --exit-with-parent         exit if the parent process dies
 //
-// Control port (UDP, one-line ASCII, e.g. via `nc -u`):
+// Control port (UDP on 127.0.0.1 only, one-line ASCII, e.g. via `nc -u`):
 //   az <deg>         set azimuth
 //   el <deg>         set elevation
 //   dist <value>     set distance (drives air absorption only here — send
@@ -356,7 +356,7 @@ func startControlListener(port: UInt16) {
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
     addr.sin_port = port.bigEndian
-    addr.sin_addr.s_addr = INADDR_ANY
+    addr.sin_addr.s_addr = UInt32(INADDR_LOOPBACK).bigEndian  // control is local-only
     let result = withUnsafePointer(to: &addr) { rawAddr in
         rawAddr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockAddr in
             bind(fd, sockAddr, socklen_t(MemoryLayout<sockaddr_in>.size))
