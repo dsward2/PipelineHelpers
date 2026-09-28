@@ -38,7 +38,7 @@ import Darwin
 //     on a crash/SIGKILL, where the app can't run its own cleanup). Because this
 //     is the downstream-most reader in the rtl_fm | sox | PCMUDPSender chain,
 //     exiting here collapses the whole pipeline via SIGPIPE upstream.
-//   --control-port  UDP port for live "relay on"/"relay off"/"relay?" commands
+//   --control-port  UDP port (127.0.0.1 only) for live "relay on"/"relay off"/"relay?" commands
 //     (same control-socket convention as PCMDistanceGain/PCMMixer). Lets a host
 //     app mute/unmute the outgoing stream without restarting this process or
 //     anything upstream of it — e.g. ControlBooth's AirPlay receiver keeps
@@ -193,7 +193,7 @@ func startControlListener(port: UInt16) {
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
     addr.sin_port = port.bigEndian
-    addr.sin_addr.s_addr = INADDR_ANY
+    addr.sin_addr.s_addr = UInt32(INADDR_LOOPBACK).bigEndian  // control is local-only
     let result = withUnsafePointer(to: &addr) { rawAddr in
         rawAddr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockAddr in
             bind(fd, sockAddr, socklen_t(MemoryLayout<sockaddr_in>.size))

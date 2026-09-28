@@ -43,7 +43,7 @@ Read the text from a file.
 
 `--input udp:<port>`
 
-Wait for text datagrams; each one replaces the current text (send with `nc -u`).
+Wait for text datagrams on 127.0.0.1 only; each one replaces the current text (send with `nc -u 127.0.0.1 <port>`).
 
 `--rate <hz>`
 
@@ -97,7 +97,7 @@ Send output over UDP instead of stdout.
 
 `--control-port <n>`
 
-UDP port for live mix control (see below).
+UDP port for live mix control (see below). Bound to 127.0.0.1 only; the `udp:` inputs listen on all interfaces.
 
 `--gain <i>=<g>`
 
@@ -227,7 +227,7 @@ Select a built-in preset (indexes in `--list-params`).
 
 `--control-port <n>`
 
-UDP port for live control (see below).
+UDP port for live control (see below). Bound to 127.0.0.1 only.
 
 `--out-of-process`
 

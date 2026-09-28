@@ -22,7 +22,7 @@ import Darwin
 //        [--duck-input <i>] [--duck-threshold <0..1>] [--duck-attenuation <0..1>]
 //        [--duck-attack-ms <n>] [--duck-release-ms <n>] [--duck-hold-ms <n>]
 //
-// Control port (UDP, one-line ASCII commands, e.g. via `nc -u`):
+// Control port (UDP on 127.0.0.1 only, one-line ASCII commands, e.g. via `nc -u`):
 //   ratio <0..1>     crossfade inputs 0/1 (gain0 = 1−r, gain1 = r)
 //   gain <i> <g>     set input i's gain (g ≥ 0; > 1 amplifies)
 //   gains            reply to the sender with the current gain list
@@ -297,7 +297,9 @@ final class ByteFIFO: @unchecked Sendable {
 
 // MARK: UDP socket helpers
 
-func boundUDPSocket(port: UInt16, purpose: String) -> Int32 {
+/// `loopbackOnly` binds 127.0.0.1 (the control port); otherwise all
+/// interfaces (the `udp:<port>` audio inputs).
+func boundUDPSocket(port: UInt16, purpose: String, loopbackOnly: Bool = false) -> Int32 {
     let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
     guard fd >= 0 else { fail("socket() for \(purpose) failed: \(String(cString: strerror(errno)))") }
     var reuse: Int32 = 1
@@ -305,7 +307,7 @@ func boundUDPSocket(port: UInt16, purpose: String) -> Int32 {
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
     addr.sin_port = port.bigEndian
-    addr.sin_addr.s_addr = INADDR_ANY
+    addr.sin_addr.s_addr = loopbackOnly ? UInt32(INADDR_LOOPBACK).bigEndian : INADDR_ANY
     let result = withUnsafePointer(to: &addr) { rawAddr in
         rawAddr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockAddr in
             bind(fd, sockAddr, socklen_t(MemoryLayout<sockaddr_in>.size))
@@ -334,7 +336,7 @@ func connectedUDPSocket(host: String, port: UInt16) -> Int32 {
 // MARK: Control port (ratio / gain / gains commands)
 
 func startControlListener(port: UInt16) {
-    let fd = boundUDPSocket(port: port, purpose: "control")
+    let fd = boundUDPSocket(port: port, purpose: "control", loopbackOnly: true)
     Thread.detachNewThread {
         let bufferSize = 1024
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 1)
