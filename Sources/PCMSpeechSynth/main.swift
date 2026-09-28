@@ -186,6 +186,8 @@ final class SpeechRenderer: NSObject, AVSpeechSynthesizerDelegate, @unchecked Se
     private let lock = NSLock()
     private var rendered = Data()
     private var finished = false
+    /// When the last zero-length buffer arrived (nil until one does).
+    private var zeroBufferAt: Date?
 
     init(sampleRate: Double) {
         guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate,
@@ -204,6 +206,7 @@ final class SpeechRenderer: NSObject, AVSpeechSynthesizerDelegate, @unchecked Se
         lock.lock()
         rendered = Data()
         finished = false
+        zeroBufferAt = nil
         converter = nil
         lock.unlock()
 
@@ -225,16 +228,22 @@ final class SpeechRenderer: NSObject, AVSpeechSynthesizerDelegate, @unchecked Se
             self.lock.lock()
             defer { self.lock.unlock() }
             if pcm.frameLength == 0 {
-                self.finished = true   // zero-length buffer signals completion
+                // Not necessarily the end: longer text gets a zero-length
+                // buffer partway through too (seen on macOS 27 at ~15–16 s,
+                // with the rest of the utterance following), so completion
+                // is the delegate's didFinish.
+                self.zeroBufferAt = Date()
             } else {
+                self.zeroBufferAt = nil
                 self.rendered.append(self.convertLocked(pcm))
             }
         }
 
-        // Wait for the completion buffer and/or the delegate's didFinish.
+        // Wait for the delegate's didFinish — or, as a fallback in case it
+        // never comes, a zero-length buffer followed by 2 s of nothing more.
         while true {
             lock.lock()
-            let done = finished
+            let done = finished || (zeroBufferAt.map { Date().timeIntervalSince($0) > 2 } ?? false)
             lock.unlock()
             if done { break }
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
