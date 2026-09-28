@@ -43,7 +43,7 @@ Read the text from a file.
 
 `--input udp:<port>`
 
-Wait for text datagrams; each one replaces the current text (send with `nc -u`).
+Wait for text datagrams on 127.0.0.1 only; each one replaces the current text (send with `nc -u 127.0.0.1 <port>`).
 
 `--rate <hz>`
 
