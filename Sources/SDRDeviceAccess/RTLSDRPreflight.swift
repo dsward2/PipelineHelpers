@@ -27,6 +27,9 @@ public struct RTLSDRPreflightReport: Sendable, Equatable {
     /// running. Quitting Gqrx frees the dongle — what drives a "Quit Gqrx and
     /// Retry" button. (Stopping Gqrx's DSP doesn't: the device stays open.)
     public let gqrxIsHolder: Bool
+    /// True when the first open failed, nothing known held the dongle, and a
+    /// USB reset (see `RTLSDRUSBReset`) was issued before this outcome.
+    public let didReset: Bool
 
     public var isAvailable: Bool { outcome == .available }
 
@@ -41,7 +44,8 @@ public struct RTLSDRPreflightReport: Sendable, Equatable {
     public var message: String {
         switch outcome {
         case .available:
-            return "\(deviceLabel) is available."
+            return didReset ? "\(deviceLabel) was unresponsive and has been reset; it is available."
+                            : "\(deviceLabel) is available."
         case .noDevices:
             return "No RTL-SDR devices are connected."
         case .notFound:
@@ -62,13 +66,14 @@ public struct RTLSDRPreflightReport: Sendable, Equatable {
     }
 
     public init(requested: String, outcome: Outcome, index: UInt32?, serial: String,
-                holders: [SDRDeviceHolder] = [], gqrxIsHolder: Bool = false) {
+                holders: [SDRDeviceHolder] = [], gqrxIsHolder: Bool = false, didReset: Bool = false) {
         self.requested = requested
         self.outcome = outcome
         self.index = index
         self.serial = serial
         self.holders = holders
         self.gqrxIsHolder = gqrxIsHolder
+        self.didReset = didReset
     }
 }
 
@@ -94,28 +99,56 @@ public enum RTLSDRPreflight {
                              backend: RTLSDRBackend,
                              excludingPIDs: Set<pid_t> = [],
                              holders: () -> [SDRDeviceHolder]? = { nil },
-                             gqrxInputDevice: () -> String? = { GqrxRemoteControl.inputDevice() })
+                             gqrxInputDevice: () -> String? = { GqrxRemoteControl.inputDevice() },
+                             resetDevice: (String) -> Bool = { RTLSDRUSBReset.reset(serial: $0) == .reset })
         -> RTLSDRPreflightReport
     {
         let requested = device.trimmingCharacters(in: .whitespaces)
-        let count = backend.deviceCount()
-        guard count > 0 else {
+
+        /// The dongle `requested` names right now, or the report that says why not.
+        func resolve() -> (index: UInt32, serial: String, serials: [String?])? {
+            let count = backend.deviceCount()
+            guard count > 0 else { return nil }
+            let serials = (0..<count).map { backend.serial(at: $0) }
+            guard let index = RTLSDRDeviceResolver.rtlToolIndex(for: requested, serials: serials) else { return nil }
+            return (index, serials[Int(index)] ?? "", serials)
+        }
+
+        guard backend.deviceCount() > 0 else {
             return RTLSDRPreflightReport(requested: requested, outcome: .noDevices, index: nil, serial: "")
         }
-        let serials = (0..<count).map { backend.serial(at: $0) }
-        guard let index = RTLSDRDeviceResolver.rtlToolIndex(for: requested, serials: serials) else {
+        guard var target = resolve() else {
             return RTLSDRPreflightReport(requested: requested, outcome: .notFound, index: nil, serial: "")
         }
-        let serial = serials[Int(index)] ?? ""
 
-        let code = backend.tryOpen(at: index)
+        var code = backend.tryOpen(at: target.index)
+        var didReset = false
+
+        // A failure that isn't "someone else has it" (-3, -6) on a dongle no
+        // known program is using is a wedged device. Reset it over USB — the
+        // software version of unplugging and replugging — and look again. The
+        // index can change when it re-enumerates, so resolve it afresh.
+        var running = holders() ?? SDRDeviceHolders.running(excludingPIDs: excludingPIDs)
+        if code != 0, code != -3, code != -6, running.isEmpty, !target.serial.isEmpty,
+           resetDevice(target.serial)
+        {
+            didReset = true
+            guard let again = resolve() else {
+                return RTLSDRPreflightReport(requested: requested, outcome: .notFound, index: nil, serial: "",
+                                             didReset: true)
+            }
+            target = again
+            code = backend.tryOpen(at: target.index)
+        }
+        let index = target.index, serial = target.serial, serials = target.serials
+
         guard code != 0 else {
-            return RTLSDRPreflightReport(requested: requested, outcome: .available, index: index, serial: serial)
+            return RTLSDRPreflightReport(requested: requested, outcome: .available, index: index, serial: serial,
+                                         didReset: didReset)
         }
 
         // Busy: find out who has it. Gqrx can say exactly which device it
         // holds; everything else is a list of likely candidates.
-        var running = holders() ?? SDRDeviceHolders.running(excludingPIDs: excludingPIDs)
         var gqrxIsHolder = false
         if running.contains(where: { $0.name == "Gqrx" }) {
             if let gqrxDevice = gqrxInputDevice() {
@@ -135,7 +168,8 @@ public enum RTLSDRPreflight {
         }
 
         return RTLSDRPreflightReport(requested: requested, outcome: .busy(code: code), index: index,
-                                     serial: serial, holders: running, gqrxIsHolder: gqrxIsHolder)
+                                     serial: serial, holders: running, gqrxIsHolder: gqrxIsHolder,
+                                     didReset: didReset)
     }
 
     /// Quits Gqrx (a normal quit — see `GqrxApp`), then re-checks `device`,
