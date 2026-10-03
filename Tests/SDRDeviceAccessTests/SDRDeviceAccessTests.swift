@@ -255,3 +255,98 @@ final class GqrxRemoteControlTests: XCTestCase {
         XCTAssertNil(GqrxRemoteControl.inputDevice(port: port))
     }
 }
+
+/// Opens fail with `failCode` until `reset` is flipped, like a wedged dongle
+/// that a USB reset revives. After a reset the enumeration order changes.
+private final class WedgedBackend: RTLSDRBackend {
+    var serialsBefore: [String?] = ["00000090", "00000360"]
+    var serialsAfter: [String?] = ["00000360", "00000090"]
+    var failCode: Int32 = -1
+    var reset = false
+    private var serials: [String?] { reset ? serialsAfter : serialsBefore }
+    func deviceCount() -> UInt32 { UInt32(serials.count) }
+    func serial(at index: UInt32) -> String? { serials[Int(index)] }
+    func tryOpen(at index: UInt32) -> Int32 {
+        // Only the wedged dongle fails; "00000360" is healthy.
+        serials[Int(index)] == "00000090" && !reset ? failCode : 0
+    }
+}
+
+final class RTLSDRPreflightResetTests: XCTestCase {
+    private func check(_ backend: WedgedBackend, holders: [SDRDeviceHolder] = [],
+                       resets: inout [String], resetWorks: Bool = true) -> RTLSDRPreflightReport {
+        var requested: [String] = []
+        let report = RTLSDRPreflight.check(device: "00000090", backend: backend, holders: { holders },
+                                           gqrxInputDevice: { nil },
+                                           resetDevice: { serial in
+                                               requested.append(serial)
+                                               backend.reset = resetWorks
+                                               return resetWorks
+                                           })
+        resets = requested
+        return report
+    }
+
+    func testWedgedDongleIsResetThenAvailableAtItsNewIndex() {
+        var resets: [String] = []
+        let report = check(WedgedBackend(), resets: &resets)
+        XCTAssertEqual(resets, ["00000090"])
+        XCTAssertTrue(report.isAvailable)
+        XCTAssertTrue(report.didReset)
+        XCTAssertEqual(report.index, 1)   // the order changed on re-enumeration
+    }
+
+    func testFailedResetLeavesTheDongleBusyReport() {
+        var resets: [String] = []
+        let report = check(WedgedBackend(), resets: &resets, resetWorks: false)
+        XCTAssertEqual(resets, ["00000090"])
+        XCTAssertFalse(report.isAvailable)
+        XCTAssertFalse(report.didReset)
+    }
+
+    func testContentionIsNeverReset() {
+        for code: Int32 in [-3, -6] {
+            let backend = WedgedBackend()
+            backend.failCode = code
+            var resets: [String] = []
+            let report = check(backend, resets: &resets)
+            XCTAssertEqual(resets, [], "code \(code)")
+            XCTAssertEqual(report.outcome, .busy(code: code))
+        }
+    }
+
+    func testDongleWithAKnownHolderIsNeverReset() {
+        var resets: [String] = []
+        let report = check(WedgedBackend(), holders: [SDRDeviceHolder(pid: 5, name: "rtl_fm", app: nil)],
+                           resets: &resets)
+        XCTAssertEqual(resets, [])
+        XCTAssertFalse(report.isAvailable)
+    }
+
+    func testHealthyDongleIsNotReset() {
+        var resets: [String] = []
+        let report = RTLSDRPreflight.check(device: "00000360", backend: WedgedBackend(), holders: { [] },
+                                           gqrxInputDevice: { nil },
+                                           resetDevice: { resets.append($0); return true })
+        XCTAssertTrue(report.isAvailable)
+        XCTAssertFalse(report.didReset)
+        XCTAssertEqual(resets, [])
+    }
+}
+
+/// Real hardware: resets the dongle named by `RTLSDR_RESET_SERIAL` (skipped
+/// otherwise). Only point it at an idle dongle.
+final class RTLSDRUSBResetHardwareTests: XCTestCase {
+    func testResetsARealDongleAndItComesBack() throws {
+        let serial = try XCTUnwrap(ProcessInfo.processInfo.environment["RTLSDR_RESET_SERIAL"],
+                                   "set RTLSDR_RESET_SERIAL to run")
+        let start = Date()
+        let outcome = RTLSDRUSBReset.reset(serial: serial)
+        print("reset(\(serial)) -> \(outcome) in \(Date().timeIntervalSince(start)) s")
+        XCTAssertEqual(outcome, .reset)
+    }
+
+    func testUnknownSerialIsNotFound() {
+        XCTAssertEqual(RTLSDRUSBReset.reset(serial: "no-such-serial", waitSeconds: 0.1), .notFound)
+    }
+}
