@@ -111,7 +111,7 @@ Initial crossfade for inputs 0/1 (gain₀ = 1−r, gain₁ = r).
 
 Exit if the app dies.
 
-Control commands (one line per UDP datagram, e.g. `echo "ratio 0.25" | nc -u -w1 127.0.0.1 6031`):
+Control commands (one line per UDP datagram, e.g. `echo "ratio 0.25" | nc -u -w1 127.0.0.1 6035`):
 
 Command
 
@@ -384,8 +384,8 @@ Adjust live: `echo "param 100.0 Hz 2" | nc -u -w1 127.0.0.1 6040`. Run `AUProces
 
 Stage 1 mixes the radio (stdin isn't available in stage 1, so both come in by UDP): run the radio task's audio into UDP 6032 and speech into UDP 6033 (each via `PCMUDPSender`), then a task whose single stage is:
 
-    PCMMixer  --input | udp:6032 | --input | udp:6033 | --control-port | 6031 | --ratio | 0.2 | --exit-with-parent
+    PCMMixer  --input | udp:6032 | --input | udp:6033 | --control-port | 6035 | --ratio | 0.2 | --exit-with-parent
 
-Adjust the blend live: `echo "ratio 0.5" | nc -u -w1 127.0.0.1 6031`.
+Adjust the blend live: `echo "ratio 0.5" | nc -u -w1 127.0.0.1 6035`.
 
 **Port picking:** avoid the ports AntennaHead already uses (see the Configuration tab — by default 8090/8094 web, 8080/8443 streaming, 6020 audio UDP, 6021 status UDP). Loopback UDP has no backpressure: source stages that generate faster than real time (files, speech) should pace themselves, as PCMSpeechSynth does.
