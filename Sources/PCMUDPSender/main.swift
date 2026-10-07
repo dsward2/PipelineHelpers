@@ -287,6 +287,10 @@ func reportTimingIfDue() {
     lastReportAt = Date()
 }
 
+/// Rate-limits the "no listener" note (the kernel reports the refusal on
+/// roughly every other send, so a reset-on-success flag would still spam).
+var lastRefusedNoteAt = Date.distantPast
+
 func sendAll(_ bytes: [UInt8]) -> Bool {
     guard !bytes.isEmpty else { return false }
     return bytes.withUnsafeBytes { raw -> Bool in
@@ -298,8 +302,22 @@ func sendAll(_ bytes: [UInt8]) -> Bool {
             // (so stdin keeps draining at the real-time rate and sox/shairport-sync
             // upstream never blocks), just skip the actual network send.
             if relayEnabled.get(), send(socketFD, base + offset, length, 0) < 0 {
-                note("send() failed after \(totalBytes) bytes: \(String(cString: strerror(errno)))")
-                return true
+                if errno == ECONNREFUSED {
+                    // Nobody is listening on the destination port right now
+                    // (loopback reports the ICMP port-unreachable on a
+                    // connected UDP socket). UDP is fire-and-forget: drop the
+                    // datagram and keep draining stdin rather than exiting,
+                    // which would SIGPIPE every upstream stage and kill the
+                    // whole pipeline (e.g. ControlBooth's AirPlay receiver
+                    // when its destination server isn't up yet or restarts).
+                    if Date().timeIntervalSince(lastRefusedNoteAt) >= 30 {
+                        lastRefusedNoteAt = Date()
+                        note("no listener on \(host):\(port); dropping audio until one appears")
+                    }
+                } else {
+                    note("send() failed after \(totalBytes) bytes: \(String(cString: strerror(errno)))")
+                    return true
+                }
             }
             if debugTiming {
                 let now = Date()
